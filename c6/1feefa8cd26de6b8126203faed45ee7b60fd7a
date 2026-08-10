@@ -1,0 +1,25 @@
+README.md
+  s_a070d90751d70f::t_eb6206fd193172 17-26,49,52,56-58,71
+README.zh-CN.md
+  s_a070d90751d70f::t_26eab5a22c0ea0 17-26,39,42,46-48,61
+scripts/package-app.sh
+  s_a070d90751d70f::t_0b4a4a028a02a1 6,15,17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c61feefa8cd26de6b8126203faed45ee7b60fd7a",
+  "prompts": {},
+  "sessions": {
+    "s_a070d90751d70f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea31-c92f-76a2-aa66-ee88113f620d",
+        "model": "unknown"
+      },
+      "human_author": "Tangziwen <29474333+15029035790@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
