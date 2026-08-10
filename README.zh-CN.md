@@ -14,6 +14,16 @@ Codex Session Guardian 将本机 Codex 会话事实整理成菜单栏面板和�
   <img src="Sources/TokenPet/Resources/PetAnimations/shinchan-codex-v1/guardian/frame-00.png" alt="像素小新主题" height="104">
 </p>
 
+## 下载与安装
+
+[**下载最新版 macOS 应用（Apple Silicon）**](https://github.com/15029035790/codex-session-guardian/releases/latest/download/Codex-Session-Guardian-macos-arm64.zip)
+
+1. 解压 `Codex-Session-Guardian-macos-arm64.zip`。
+2. 将 **Codex Session Guardian.app** 移入 `/Applications`。
+3. 从“应用程序”启动。首次启动请按住 Control 点击应用并选择“打开”；如果仍被拦截，请前往“系统设置 → 隐私与安全性”选择“仍要打开”。
+
+当前社区构建经过 ad-hoc 签名，但尚未经过 Apple 公证。你可以用[最新版 Release](https://github.com/15029035790/codex-session-guardian/releases/latest)附带的 `.sha256` 文件校验下载包。
+
 ## 核心能力
 
 - **跨项目会话视图**：将本地 Codex 轮次归并为用户可见的任务会话。
@@ -26,16 +36,16 @@ Codex Session Guardian 将本机 Codex 会话事实整理成菜单栏面板和�
 - **两套动画主题**：舞蹈小新和像素小新可整套切换，选择会持久化。
 - **本地隐私**：只保存 Token 事实和文件游标，不保存提示词、回复、源码或工具正文。
 
-## 环境要求
+## 系统要求
 
 - macOS 14+
-- 当前打包脚本面向 Apple Silicon
-- Swift 6.2
+- Apple Silicon
 - Codex Desktop 或 `~/.codex` 下的 Codex 会话日志
 - SQLite 3
-- 只有重新生成像素主题时才需要 `ffmpeg`
 
-## 构建与运行
+## 从源码构建
+
+从源码构建还需要 Swift 6.2；只有重新生成像素主题时才需要 `ffmpeg`。
 
 ```bash
 swift build
@@ -48,7 +58,7 @@ swift build
 .build/debug/codex-session-guardian-tests
 ```
 
-生成 ad-hoc 签名应用包：
+生成经过优化和 ad-hoc 签名的应用包：
 
 ```bash
 scripts/package-app.sh dist/Codex-Session-Guardian.app

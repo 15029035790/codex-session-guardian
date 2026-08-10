@@ -14,6 +14,16 @@ Codex Session Guardian turns local Codex session telemetry into a lightweight me
   <img src="Sources/TokenPet/Resources/PetAnimations/shinchan-codex-v1/guardian/frame-00.png" alt="Pixel Shin-chan theme" height="104">
 </p>
 
+## Download
+
+[**Download the latest macOS app (Apple Silicon)**](https://github.com/15029035790/codex-session-guardian/releases/latest/download/Codex-Session-Guardian-macos-arm64.zip)
+
+1. Unzip `Codex-Session-Guardian-macos-arm64.zip`.
+2. Move **Codex Session Guardian.app** to `/Applications`.
+3. Launch it from Applications. On the first launch, Control-click the app and choose **Open**. If macOS still blocks it, go to **System Settings → Privacy & Security** and choose **Open Anyway**.
+
+The current community build is ad-hoc signed but not Apple-notarized. You can compare its SHA-256 digest with the `.sha256` file attached to the [latest release](https://github.com/15029035790/codex-session-guardian/releases/latest).
+
 ## Why it exists
 
 Long Codex tasks can remain technically active while their context becomes expensive, repeatedly compacted, or difficult to resume safely. Raw token totals alone do not explain that risk. Session Guardian prioritizes the signals that change your next decision:
@@ -36,16 +46,16 @@ Long Codex tasks can remain technically active while their context becomes expen
 - **Two animation sets** — switches between Dance Shin-chan and Pixel Shin-chan, with the selected set persisted locally.
 - **Local by design** — stores token facts and file cursors, not prompts, responses, source code, or tool payloads.
 
-## Requirements
+## System requirements
 
 - macOS 14 or later
-- Apple Silicon for the current packaging script
-- Swift 6.2 toolchain
+- Apple Silicon
 - Codex Desktop or Codex session logs under `~/.codex`
 - SQLite 3
-- `ffmpeg` only when regenerating the optional Pixel Shin-chan theme
 
-## Build and run
+## Build from source
+
+Building from source additionally requires the Swift 6.2 toolchain. `ffmpeg` is needed only when regenerating the optional Pixel Shin-chan theme.
 
 ```bash
 swift build
@@ -58,7 +68,7 @@ Run the executable test suite:
 .build/debug/codex-session-guardian-tests
 ```
 
-Create an ad-hoc signed app bundle:
+Create an optimized, ad-hoc signed app bundle:
 
 ```bash
 scripts/package-app.sh dist/Codex-Session-Guardian.app
