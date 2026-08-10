@@ -1,0 +1,25 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+
+.validation-data/
+dist/
+evidence/
+log/
+outputs/
+
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.xcuserstate
+.env
+.env.*
+
+# Local source/intermediate artwork; only normalized runtime frames are public.
+Sources/TokenPet/Resources/ActionKamen/
+Sources/TokenPet/Resources/shinchan.png
+Sources/TokenPet/Resources/shinchan-chroma.png
+Sources/TokenPet/Resources/shinchan-dance.png
+Sources/TokenPet/Resources/shinchan-dance-chroma.png

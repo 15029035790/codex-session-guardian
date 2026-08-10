@@ -1,0 +1,161 @@
+{
+  "schemaVersion" : 1,
+  "sequences" : [
+    {
+      "alphaUnion" : {
+        "height" : 240,
+        "width" : 207,
+        "x" : 23,
+        "y" : 9
+      },
+      "frameCount" : 6,
+      "id" : "idle",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 72,
+          "x" : 17,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 256,
+        "width" : 256
+      }
+    },
+    {
+      "alphaUnion" : {
+        "height" : 236,
+        "width" : 235,
+        "x" : 8,
+        "y" : 16
+      },
+      "frameCount" : 8,
+      "id" : "multitask",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 82,
+          "x" : 12,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 256,
+        "width" : 256
+      }
+    },
+    {
+      "alphaUnion" : {
+        "height" : 226,
+        "width" : 210,
+        "x" : 25,
+        "y" : 21
+      },
+      "frameCount" : 12,
+      "id" : "success",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 78,
+          "x" : 14,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 256,
+        "width" : 256
+      }
+    },
+    {
+      "alphaUnion" : {
+        "height" : 230,
+        "width" : 200,
+        "x" : 31,
+        "y" : 13
+      },
+      "frameCount" : 4,
+      "id" : "working",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 72,
+          "x" : 17,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 256,
+        "width" : 256
+      }
+    },
+    {
+      "alphaUnion" : {
+        "height" : 179,
+        "width" : 221,
+        "x" : 17,
+        "y" : 64
+      },
+      "frameCount" : 10,
+      "id" : "thinking",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 102,
+          "x" : 2,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 256,
+        "width" : 256
+      }
+    },
+    {
+      "alphaUnion" : {
+        "height" : 268,
+        "width" : 200,
+        "x" : 47,
+        "y" : 7
+      },
+      "frameCount" : 3,
+      "id" : "guardian",
+      "normalized" : {
+        "alphaUnion" : {
+          "height" : 82,
+          "width" : 62,
+          "x" : 22,
+          "y" : 24
+        },
+        "canvasHeight" : 116,
+        "canvasWidth" : 106,
+        "footBaseline" : 10,
+        "visibleHeight" : 82
+      },
+      "sourceCanvas" : {
+        "height" : 282,
+        "width" : 282
+      }
+    }
+  ]
+}
