@@ -466,18 +466,18 @@ final class DashboardModel: ObservableObject {
     }
 
     func replayWithRecommendation(_ replay: PendingRoutingReplay) {
-        replay(replay, using: replay.recommended)
+        performReplay(replay, using: replay.recommended)
     }
 
     func rejectRecommendationAndReplay(_ replay: PendingRoutingReplay) {
-        replay(replay, using: replay.current)
+        performReplay(replay, using: replay.current)
     }
 
     func cancelRoutingReplay(_ replay: PendingRoutingReplay) {
         pendingRoutingReplays.removeValue(forKey: replay.sessionID)
     }
 
-    private func replay(_ replay: PendingRoutingReplay, using selection: RoutingSelection) {
+    private func performReplay(_ replay: PendingRoutingReplay, using selection: RoutingSelection) {
         guard replayingRoutingSessionID == nil else { return }
         replayingRoutingSessionID = replay.sessionID
         let databasePath = SessionScanner.defaultDatabasePath()

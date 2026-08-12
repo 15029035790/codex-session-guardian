@@ -497,8 +497,9 @@ public enum CodexThreadSelectionReader {
 public enum RoutingReplaySafety {
     public static let maximumTailBytes: UInt64 = 512 * 1_024
 
-    /// Returns nil when the private rollout cannot be read safely. Callers must
-    /// fail open and must not offer replay in that case.
+    /// Returns nil when the private rollout cannot be read or its bounded tail
+    /// does not establish a lifecycle state. Callers must fail closed and must
+    /// not offer replay in that case.
     public static func isTurnActive(transcriptPath: String) -> Bool? {
         let url = URL(fileURLWithPath: transcriptPath)
         guard let handle = try? FileHandle(forReadingFrom: url),
@@ -512,7 +513,7 @@ public enum RoutingReplaySafety {
         if start > 0, let newline = data.firstIndex(of: 0x0A) {
             data = Data(data.suffix(from: data.index(after: newline)))
         }
-        var active = false
+        var active: Bool?
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
             guard line.range(of: Data(#""type":"event_msg""#.utf8)) != nil,
                   let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],

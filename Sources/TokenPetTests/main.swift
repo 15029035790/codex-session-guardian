@@ -1998,6 +1998,18 @@ func testRoutingPreflightPolicy() throws {
         RoutingReplaySafety.isTurnActive(transcriptPath: activeRollout.path),
         false,
         "terminal event re-enables idle replay")
+    let longActiveRollout = root.appendingPathComponent("long-active.jsonl")
+    try Data(startedLine + [0x0A]).write(to: longActiveRollout)
+    let longActiveHandle = try FileHandle(forWritingTo: longActiveRollout)
+    try longActiveHandle.seekToEnd()
+    try longActiveHandle.write(contentsOf: Data(
+        repeating: 0x20,
+        count: Int(RoutingReplaySafety.maximumTailBytes) + 1))
+    try longActiveHandle.close()
+    try expect(
+        RoutingReplaySafety.isTurnActive(transcriptPath: longActiveRollout.path),
+        nil,
+        "bounded tail without lifecycle fails closed for long active replay")
     try expect(
         RoutingReplaySafety.isTurnActive(transcriptPath: root.appendingPathComponent("missing.jsonl").path),
         nil,
