@@ -674,16 +674,9 @@ func testRoutingOutcomeObservation() throws {
     let successfulPostflight = RoutingPostflightAssessment.evaluate(success)
     try expect(successfulPostflight.quality, .passed, "verified success retains the route")
     try expect(successfulPostflight.usage.total, 100, "postflight retains exact provider usage")
-    var terraMediumFailure = failure
-    terraMediumFailure.model = "gpt-5.6-terra"
-    terraMediumFailure.reasoningEffort = "medium"
-    let firstUpgrade = RoutingPostflightAssessment.evaluate(terraMediumFailure)
-    try expect(firstUpgrade.recommendedNext?.model, "gpt-5.6-terra", "Terra failure first keeps the balanced model")
-    try expect(firstUpgrade.recommendedNext?.reasoningEffort, "high", "Terra medium failure upgrades effort first")
-    terraMediumFailure.reasoningEffort = "high"
-    let secondUpgrade = RoutingPostflightAssessment.evaluate(terraMediumFailure)
-    try expect(secondUpgrade.recommendedNext?.model, "gpt-5.6-sol", "Terra high failure upgrades to Sol")
-    try expect(secondUpgrade.recommendedNext?.reasoningEffort, "medium", "Sol returns to balanced effort")
+    let failedPostflight = RoutingPostflightAssessment.evaluate(failure)
+    try expect(failedPostflight.quality, .failed, "failed verification remains visible")
+    try expect(failedPostflight.action, .reviewTaskContract, "failure does not infer a route for a future task")
 
     let summary = RoutingOutcomeSummary.build(from: [unverified, success, failure, stopped])
     try expect(summary.decisiveSamples, 2, "only verified pass or failure is decisive")
@@ -792,18 +785,6 @@ func testRoutingPreferencePersistence() throws {
     try expect(onePair.state, .candidateTrialReady, "one successful pair can propose another real-task trial")
     try expect(onePair.comparablePairs, 1, "comparable pair counted")
     try expect(onePair.tokenSavingsRatio > 0.5, true, "pair still reports measured savings")
-    let nextRecommendation = RoutingRecommendationEngine.nextTaskRecommendation(
-        profile: profile,
-        evaluations: [sample, candidate],
-        outcomes: [])
-    try expect(nextRecommendation?.lane, .frozenExecution, "eligible trial maps to frozen task lane")
-    try expect(nextRecommendation?.model, "gpt-5.6-luna", "recommendation retains model family")
-    try expect(nextRecommendation?.candidateEffort, "xhigh", "recommendation proposes measured effort")
-    try expect(nextRecommendation?.confidenceState, .trialReady, "single controlled pair remains a trial")
-    try expect(
-        nextRecommendation?.upgradeConditionCode,
-        "upgrade_if_contract_not_frozen_or_acceptance_not_mechanical",
-        "recommendation states when to keep the quality baseline")
 
     var failedCandidate = candidate
     failedCandidate.qualityPassed = false
@@ -812,13 +793,6 @@ func testRoutingPreferencePersistence() throws {
         baselineEffort: "max",
         candidateEffort: "xhigh")
     try expect(failed.state, .candidateFailedQuality, "quality failure rejects candidate before sample threshold")
-    try expect(
-        RoutingRecommendationEngine.nextTaskRecommendation(
-            profile: profile,
-            evaluations: [sample, failedCandidate],
-            outcomes: []),
-        nil,
-        "failed candidate is not shown as a next-task recommendation")
 
     var sufficient: [RoutingEvaluationSample] = []
     for index in 0..<3 {
@@ -1224,6 +1198,19 @@ func testSessionHealthAndActivity() throws {
     try expect(snapshot.startFreshSessions.map(\.sessionID), ["resume-fresh", "zombie"], "stopped risk grouping")
     try expect(snapshot.recentHealthySessions.map(\.sessionID), ["recent"], "healthy recent grouping")
     try expect(snapshot.highestRisk, .amber, "historical red not realtime radar")
+
+    let recentFirst = DashboardSnapshot(
+        active: [makeTurn(session: "old-active", pressure: 0.20, activityAge: 50)],
+        recent: [
+            makeTurn(session: "new-healthy", pressure: 0.20, status: .completed, activityAge: 2),
+            makeTurn(session: "middle-risk", pressure: 0.80, status: .completed, activityAge: 20),
+        ],
+        indexedFiles: 3,
+        updatedAt: now)
+    try expect(
+        recentFirst.sessions.map(\.sessionID),
+        ["new-healthy", "middle-risk", "old-active"],
+        "all menu sessions are sorted by most recent execution")
 
     var cacheHeavy = makeTurn(session: "cache-heavy", pressure: 0.20, fresh: 1_000, status: .completed)
     cacheHeavy.usage.input = 100_000
@@ -1880,53 +1867,6 @@ func testLiveActivityMonitorLatency() throws {
     try expect(elapsed < 1.0, true, "monitor measured latency")
 }
 
-func testGuardianInboxState() throws {
-    let start = Date(timeIntervalSince1970: 1_800_000_000)
-    var inbox = GuardianInboxState()
-    let waiting = GuardianInboxItem(
-        sessionID: "waiting",
-        sessionTitle: "等待任务",
-        kind: .waitingForUser,
-        occurredAt: start,
-        publicSummary: "需要确认")
-    try expect(inbox.record(waiting), true, "first inbox event recorded")
-    try expect(inbox.record(waiting), false, "duplicate inbox event ignored")
-    try expect(inbox.unreadCount, 1, "new inbox event unread")
-    inbox.markRead(waiting.id)
-    try expect(inbox.unreadCount, 0, "single inbox event read")
-
-    for index in 1...55 {
-        _ = inbox.record(GuardianInboxItem(
-            sessionID: "session-\(index)",
-            sessionTitle: "Task \(index)",
-            kind: .completed,
-            occurredAt: start.addingTimeInterval(Double(index))))
-    }
-    try expect(inbox.items.count, GuardianInboxState.maximumItems, "inbox ring capacity")
-    try expect(inbox.items.first?.sessionID, "session-55", "newest inbox event first")
-    try expect(inbox.items.contains(where: { $0.sessionID == "session-1" }), false, "oldest inbox event evicted")
-    inbox.markAllRead()
-    try expect(inbox.unreadCount, 0, "mark all inbox events read")
-
-    try expect(
-        GuardianInboxState.kind(for: .waitingForUser),
-        .waitingForUser,
-        "waiting activity enters inbox")
-    try expect(GuardianInboxState.kind(for: .runningCommand) == nil, true, "routine activity stays out of inbox")
-    try expect(
-        GuardianInboxState.healthKind(from: .green, to: .amber),
-        .healthWatch,
-        "health watch transition")
-    try expect(
-        GuardianInboxState.healthKind(from: .amber, to: .red),
-        .healthCritical,
-        "health critical transition")
-    try expect(
-        GuardianInboxState.healthKind(from: .red, to: .green) == nil,
-        true,
-        "health recovery does not create an alert")
-}
-
 func testHandoffShadowTelemetry() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -2573,7 +2513,6 @@ let tests: [(String, () throws -> Void)] = [
     ("live activity fragmentation and isolation", testLiveActivityFragmentationAndIsolation),
     ("live activity truncation and partial file", testLiveActivityTruncationAndPartialFile),
     ("live activity monitor latency", testLiveActivityMonitorLatency),
-    ("Guardian Inbox bounded attention history", testGuardianInboxState),
     ("handoff shadow telemetry and privacy", testHandoffShadowTelemetry),
     ("quick handoff capsule privacy and budget", testQuickHandoffCapsule),
     ("handoff history injection protocol", testHandoffHistoryInjection),

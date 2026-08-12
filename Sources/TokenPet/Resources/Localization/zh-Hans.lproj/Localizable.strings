@@ -28,6 +28,8 @@
 "Shin-chan hover animation" = "小新悬停动画";
 "Active" = "进行中";
 "Most recent first" = "最近活动优先";
+"Tasks" = "任务";
+"Most recently executed first" = "最近执行优先";
 "No running or recently active sessions" = "暂无运行中或最近活跃的会话";
 "Start fresh before continuing" = "继续前先新开任务";
 "Before you resume" = "恢复前";
@@ -56,6 +58,10 @@
 "Use dark appearance" = "使用深色外观";
 "Refreshing session status" = "正在刷新会话状态";
 "Refresh now" = "立即刷新";
+"Quick restart" = "快速重启";
+"Restart the guardian without changing session data" = "不改变会话数据，快速重启小新";
+"Quick restart is available in the installed app." = "快速重启仅适用于已安装的应用。";
+"Could not restart the guardian: %@" = "无法重启小新：%@";
 "Quit" = "退出";
 "Personalized health thresholds" = "个性化健康阈值";
 "My task routes" = "我的任务路线";
@@ -67,6 +73,7 @@
 "Clear, bounded, independently verifiable work" = "明确、有界、可独立验证的任务";
 "Settled work that still needs dense judgment" = "方案已冻结但仍需要密集判断的任务";
 "Routes are matched by workload role, not by a scalar downgrade ladder. Automatic switching is off." = "按任务角色匹配路线，不做机械降档；自动切换暂未开启。";
+"This panel records route baselines and local comparison evidence. It does not predict your next task or switch a running task." = "这里只记录路线基线和本地对照证据，不预测你的下一个任务，也不会切换正在执行的任务。";
 "Current model habits" = "当前模型使用习惯";
 "Not yet validated" = "尚未验证";
 "Official role: frontier capability" = "官方定位：前沿能力";
@@ -140,10 +147,12 @@
 "The recommended configuration matched this task with high confidence." = "当前任务与建议配置高度匹配。";
 "Quality passed · route retained" = "质量通过 · 保留当前配置";
 "Quality did not pass · upgrade next similar task" = "质量未达标 · 下个同类任务升级";
+"Quality did not pass · review task contract" = "质量未达标 · 需复核任务契约";
 "Task completed · quality not yet proven" = "任务已完成 · 质量尚未证明";
 "Quality passed first; Token and duration are now eligible for comparison." = "质量先通过，Token 和耗时才进入效率比较。";
 "Completion alone is not success. Add tests or explicit acceptance before learning from it." = "完成不等于成功；补充测试或明确验收后才用于调优。";
 "The frontier route also missed quality; review the task contract before retrying." = "前沿配置也未达标，应先检查任务契约再重试。";
+"Review this task contract before retrying; no configuration is inferred for a future task." = "重试前请复核当前任务契约；小新不会为未来任务推断配置。";
 "Next similar task: %@/%@. Rework cost is counted against this route." = "下个同类任务建议 %@/%@；返工成本会计入当前配置。";
 "A lower-cost configuration matched this task with high confidence." = "小新高置信度匹配到了更低成本的充分配置。";
 "Guardian Inbox" = "Guardian 收件箱";
@@ -180,6 +189,9 @@
 "Interrupted" = "已中断";
 "Stopped" = "已停止";
 "Click to collapse session cards" = "点击折叠会话卡片";
+"Active task cards" = "活跃任务卡片";
+"Collapse cards" = "收起卡片";
+"Collapse floating task cards" = "收起悬浮任务卡片";
 "Click to pin session cards" = "点击固定会话卡片";
 "Collapse guardian session cards" = "折叠小新会话卡片";
 "Pin guardian session cards" = "固定小新会话卡片";
@@ -282,6 +294,7 @@
 "Keep %@ · candidate failed quality" = "保留 %@ · 候选质量未通过";
 "Keep %@ · no measured gain" = "保留 %@ · 未测得收益";
 "Next comparison: %@" = "下一对照：%@";
+"Pending comparison: %@" = "待做对照：%@";
 "%lld verified · %lld failed · %lld unverified" = "%lld 已验证 · %lld 失败 · %lld 未验证";
 "%@ quality: %lld/%lld verified" = "%@ 质量：%lld/%lld 已验证";
 "Personal recommendation · %@/%@" = "个人推荐 · %@/%@";

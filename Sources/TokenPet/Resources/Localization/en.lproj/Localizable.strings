@@ -28,6 +28,8 @@
 "Shin-chan hover animation" = "Shin-chan hover animation";
 "Active" = "Active";
 "Most recent first" = "Most recent first";
+"Tasks" = "Tasks";
+"Most recently executed first" = "Most recently executed first";
 "No running or recently active sessions" = "No running or recently active sessions";
 "Start fresh before continuing" = "Start fresh before continuing";
 "Before you resume" = "Before you resume";
@@ -56,6 +58,10 @@
 "Use dark appearance" = "Use dark appearance";
 "Refreshing session status" = "Refreshing session status";
 "Refresh now" = "Refresh now";
+"Quick restart" = "Quick restart";
+"Restart the guardian without changing session data" = "Restart the guardian without changing session data";
+"Quick restart is available in the installed app." = "Quick restart is available in the installed app.";
+"Could not restart the guardian: %@" = "Could not restart the guardian: %@";
 "Quit" = "Quit";
 "Personalized health thresholds" = "Personalized health thresholds";
 "My task routes" = "My task routes";
@@ -67,6 +73,7 @@
 "Clear, bounded, independently verifiable work" = "Clear, bounded, independently verifiable work";
 "Settled work that still needs dense judgment" = "Settled work that still needs dense judgment";
 "Routes are matched by workload role, not by a scalar downgrade ladder. Automatic switching is off." = "Routes are matched by workload role, not by a scalar downgrade ladder. Automatic switching is off.";
+"This panel records route baselines and local comparison evidence. It does not predict your next task or switch a running task." = "This panel records route baselines and local comparison evidence. It does not predict your next task or switch a running task.";
 "Current model habits" = "Current model habits";
 "Not yet validated" = "Not yet validated";
 "Official role: frontier capability" = "Official role: frontier capability";
@@ -140,10 +147,12 @@
 "The recommended configuration matched this task with high confidence." = "The recommended configuration matched this task with high confidence.";
 "Quality passed · route retained" = "Quality passed · route retained";
 "Quality did not pass · upgrade next similar task" = "Quality did not pass · upgrade next similar task";
+"Quality did not pass · review task contract" = "Quality did not pass · review task contract";
 "Task completed · quality not yet proven" = "Task completed · quality not yet proven";
 "Quality passed first; Token and duration are now eligible for comparison." = "Quality passed first; Token and duration are now eligible for comparison.";
 "Completion alone is not success. Add tests or explicit acceptance before learning from it." = "Completion alone is not success. Add tests or explicit acceptance before learning from it.";
 "The frontier route also missed quality; review the task contract before retrying." = "The frontier route also missed quality; review the task contract before retrying.";
+"Review this task contract before retrying; no configuration is inferred for a future task." = "Review this task contract before retrying; no configuration is inferred for a future task.";
 "Next similar task: %@/%@. Rework cost is counted against this route." = "Next similar task: %@/%@. Rework cost is counted against this route.";
 "A lower-cost configuration matched this task with high confidence." = "A lower-cost configuration matched this task with high confidence.";
 "Guardian Inbox" = "Guardian Inbox";
@@ -180,6 +189,9 @@
 "Interrupted" = "Interrupted";
 "Stopped" = "Stopped";
 "Click to collapse session cards" = "Click to collapse session cards";
+"Active task cards" = "Active task cards";
+"Collapse cards" = "Collapse cards";
+"Collapse floating task cards" = "Collapse floating task cards";
 "Click to pin session cards" = "Click to pin session cards";
 "Collapse guardian session cards" = "Collapse guardian session cards";
 "Pin guardian session cards" = "Pin guardian session cards";
@@ -282,6 +294,7 @@
 "Keep %@ · candidate failed quality" = "Keep %@ · candidate failed quality";
 "Keep %@ · no measured gain" = "Keep %@ · no measured gain";
 "Next comparison: %@" = "Next comparison: %@";
+"Pending comparison: %@" = "Pending comparison: %@";
 "%lld verified · %lld failed · %lld unverified" = "%lld verified · %lld failed · %lld unverified";
 "%@ quality: %lld/%lld verified" = "%@ quality: %lld/%lld verified";
 "Personal recommendation · %@/%@" = "Personal recommendation · %@/%@";

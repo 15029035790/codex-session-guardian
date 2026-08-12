@@ -5,7 +5,7 @@ import SwiftUI
 import TokenPetCore
 
 private enum AppVersion {
-    static let label = "v0.1.0"
+    static let label = "v0.2.0"
     static let displayName = "Codex Session Guardian"
 }
 
@@ -39,48 +39,9 @@ private enum FloatingPetPreference {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: storageKey) == nil || defaults.bool(forKey: storageKey)
     }
-}
 
-private struct ExecutionWasteCalibrationReceipt: Codable {
-    var milestone: ExecutionWasteCalibrationMilestone
-    var isRead: Bool
-}
-
-private final class ExecutionWasteCalibrationReceiptPreference {
-    private let defaults: UserDefaults
-    private let key = "ExecutionWasteCalibrationMilestoneReceipt"
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    func register(_ milestone: ExecutionWasteCalibrationMilestone) -> (
-        receipt: ExecutionWasteCalibrationReceipt?, isNew: Bool
-    ) {
-        if let current = load(), current.milestone.policyVersion == milestone.policyVersion {
-            return (current, false)
-        }
-        let receipt = ExecutionWasteCalibrationReceipt(milestone: milestone, isRead: false)
-        save(receipt)
-        return (receipt, true)
-    }
-
-    func markRead(milestoneID: String? = nil) {
-        guard var receipt = load(),
-              milestoneID == nil || receipt.milestone.id == milestoneID
-        else { return }
-        receipt.isRead = true
-        save(receipt)
-    }
-
-    private func load() -> ExecutionWasteCalibrationReceipt? {
-        guard let data = defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(ExecutionWasteCalibrationReceipt.self, from: data)
-    }
-
-    private func save(_ receipt: ExecutionWasteCalibrationReceipt) {
-        guard let data = try? JSONEncoder().encode(receipt) else { return }
-        defaults.set(data, forKey: key)
+    static func setVisible(_ visible: Bool) {
+        UserDefaults.standard.set(visible, forKey: storageKey)
     }
 }
 
@@ -191,19 +152,14 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
         button.action = #selector(togglePopover)
         button.sendAction(on: [.leftMouseUp])
         themeSubscription = NotificationCenter.default.publisher(for: .petAnimationThemeDidChange)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                self.statusItem.button?.image = Self.makeMenuIcon(
-                    hasUnread: self.model.inboxState.unreadCount > 0)
-            }
-        quotaSubscription = model.$snapshot.combineLatest(model.$inboxState).sink { [weak self] snapshot, inbox in
+            .sink { [weak self] _ in self?.statusItem.button?.image = Self.makeMenuIcon() }
+        quotaSubscription = model.$snapshot.sink { [weak self] snapshot in
             guard let button = self?.statusItem.button else { return }
             let quota = snapshot.latestQuota.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "—"
-            button.image = Self.makeMenuIcon(hasUnread: inbox.unreadCount > 0)
+            button.image = Self.makeMenuIcon()
             Self.setMenuQuota(
                 quota,
                 level: snapshot.latestQuota?.level,
-                unreadCount: inbox.unreadCount,
                 on: button)
             let statusDescription = LF("%@ · %@ quota remaining", AppVersion.displayName, quota)
             button.toolTip = statusDescription
@@ -214,11 +170,10 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     private static func setMenuQuota(
         _ text: String,
         level: QuotaLevel?,
-        unreadCount: Int = 0,
         on button: NSStatusBarButton
     ) {
         button.attributedTitle = NSAttributedString(
-            string: unreadCount > 0 ? "\(text) · \(unreadCount)" : text,
+            string: text,
             attributes: [
                 .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
                 .foregroundColor: quotaNSColor(level),
@@ -256,7 +211,7 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
         model.setPanelVisible(false)
     }
 
-    private static func makeMenuIcon(hasUnread: Bool = false) -> NSImage {
+    private static func makeMenuIcon() -> NSImage {
         let size = NSSize(width: 22, height: 22)
         let result = NSImage(size: size)
         result.lockFocus()
@@ -274,10 +229,6 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
                 from: NSRect(x: 12, y: 10, width: 82, height: 82),
                 operation: .sourceOver,
                 fraction: 1)
-        }
-        if hasUnread {
-            NSColor.systemOrange.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 16, y: 15.5, width: 5.5, height: 5.5)).fill()
         }
         result.unlockFocus()
         result.isTemplate = false
@@ -297,10 +248,7 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var isManualRefreshing = false
     @Published private(set) var manualRefreshCompletionTick = 0
     @Published private(set) var liveActivities: [String: SessionLiveActivity] = [:]
-    @Published private(set) var inboxState = GuardianInboxState()
     @Published private(set) var executionWasteAccuracy: ExecutionWasteAccuracySummary?
-    @Published private(set) var calibrationSpeechOutcome: ExecutionWasteCalibrationMilestoneOutcome?
-    @Published private(set) var calibrationSpeechTick = 0
     @Published private(set) var routingPreferenceProfile: RoutingPreferenceProfile?
     @Published private(set) var routingEvaluationSamples: [RoutingEvaluationSample] = []
     @Published private(set) var routingOutcomes: [RoutingOutcomeObservation] = []
@@ -322,7 +270,6 @@ final class DashboardModel: ObservableObject {
     private var floatingWorkspaceVisible = false
     private var resumeWarningSuppressions = ResumeWarningSuppressions()
     private var resumeWarningBudget = ResumeWarningBudget()
-    private let calibrationReceipt = ExecutionWasteCalibrationReceiptPreference()
 
     init() {
         Task { @MainActor [weak self] in self?.start() }
@@ -433,13 +380,9 @@ final class DashboardModel: ObservableObject {
                 self.routingOutcomes = outcomes
                 self.routingPreflights = preflights
                 self.executionWasteAccuracy = wasteAccuracy
-                self.synchronizeCalibrationMilestone(from: wasteAccuracy)
                 if let next {
                     self.recordRoutingPostflights(from: self.snapshot, to: next)
                     self.resumeWarningSuppressions.reconcile(with: next.sessions)
-                    if !self.isIndexing {
-                        self.recordHealthChanges(from: self.snapshot, to: next)
-                    }
                     if let warning = self.resumeWarning {
                         let current = next.sessions.first(where: { $0.sessionID == warning.sessionID })
                         let stillWaitingForUser = self.liveActivities[warning.sessionID]?.kind == .waitingForUser
@@ -575,32 +518,6 @@ final class DashboardModel: ObservableObject {
         liveActivities[sessionID] = SessionLiveActivity(
             event: event,
             previousSummary: previous?.publicSummary)
-        guard abs(Date().timeIntervalSince(event.occurredAt)) < 5,
-              let kind = GuardianInboxState.kind(for: event.kind)
-        else { return }
-        let title = snapshot.sessions.first(where: { $0.sessionID == sessionID })?.title
-            ?? snapshot.sessionTitles[sessionID]
-            ?? L("Codex session")
-        _ = inboxState.record(GuardianInboxItem(
-            sessionID: sessionID,
-            sessionTitle: title,
-            kind: kind,
-            occurredAt: event.occurredAt,
-            publicSummary: event.publicSummary))
-    }
-
-    private func recordHealthChanges(from previous: DashboardSnapshot, to next: DashboardSnapshot) {
-        let oldByID = Dictionary(uniqueKeysWithValues: previous.sessions.map { ($0.sessionID, $0) })
-        for session in next.activeSessions {
-            guard let old = oldByID[session.sessionID],
-                  let kind = GuardianInboxState.healthKind(from: old.risk, to: session.risk)
-            else { continue }
-            _ = inboxState.record(GuardianInboxItem(
-                sessionID: session.sessionID,
-                sessionTitle: session.title,
-                kind: kind,
-                occurredAt: next.updatedAt))
-        }
     }
 
     private func recordRoutingPostflights(from previous: DashboardSnapshot, to next: DashboardSnapshot) {
@@ -615,42 +532,6 @@ final class DashboardModel: ObservableObject {
         }
     }
 
-    func markAllInboxRead() {
-        inboxState.markAllRead()
-        calibrationReceipt.markRead()
-    }
-
-    func openInboxItem(_ item: GuardianInboxItem) {
-        inboxState.markRead(item.id)
-        if !item.opensSession {
-            calibrationReceipt.markRead(milestoneID: item.id)
-            return
-        }
-        openSession(item.sessionID)
-    }
-
-    private func synchronizeCalibrationMilestone(from summary: ExecutionWasteAccuracySummary) {
-        guard let milestone = ExecutionWasteCalibrationMilestone.derive(from: summary) else { return }
-        let result = calibrationReceipt.register(milestone)
-        guard let stored = result.receipt, !stored.isRead else { return }
-        let kind: GuardianInboxKind = stored.milestone.outcome == .semanticContinuityReady
-            ? .calibrationReady : .calibrationContinueShadow
-        let title = stored.milestone.outcome == .semanticContinuityReady
-            ? L("Execution waste calibration passed") : L("Execution waste calibration continues")
-        _ = inboxState.record(GuardianInboxItem(
-            sessionID: stored.milestone.policyVersion,
-            sessionTitle: title,
-            kind: kind,
-            occurredAt: stored.milestone.occurredAt,
-            publicSummary: nil,
-            isRead: false,
-            opensSession: false,
-            id: stored.milestone.id))
-        if result.isNew {
-            calibrationSpeechOutcome = stored.milestone.outcome
-            calibrationSpeechTick &+= 1
-        }
-    }
 
     private func synchronizeLiveActivityMonitor() {
         guard let scanner, let liveActivityMonitor else { return }
@@ -996,16 +877,11 @@ private struct DashboardView: View {
     @AppStorage(FloatingPetPreference.storageKey) private var floatingPetVisible = true
     @AppStorage(XiaoxinSpeechPreference.storageKey) private var speechIntensityRawValue = XiaoxinSpeechPreference.defaultValue
     @State private var detailSessionID: String?
-    @State private var startFreshExpanded = true
-    @State private var recentExpanded = false
-    @State private var inboxExpanded = false
     @State private var manualRefreshFeedback = false
 
     var body: some View {
         let sessions = model.snapshot.sessions
         let activeSessions = sessions.filter(\.isActive)
-        let startFreshSessions = sessions.filter { !$0.isActive && $0.risk != .green }
-        let recentSessions = sessions.filter { !$0.isActive && $0.risk == .green }
 
         VStack(spacing: 0) {
             header(activeCount: activeSessions.count)
@@ -1032,55 +908,12 @@ private struct DashboardView: View {
                             outcomes: model.routingOutcomes)
                     }
 
-                    GuardianInboxCard(model: model, expanded: $inboxExpanded)
-
-                    sectionHeader(L("Active"), count: activeSessions.count, note: L("Most recent first"))
-                    if activeSessions.isEmpty {
-                        Text(L("No running or recently active sessions"))
+                    sectionHeader(L("Tasks"), count: sessions.count, note: L("Most recently executed first"))
+                    if sessions.isEmpty {
+                        Text(L("No unarchived Codex sessions to display"))
                             .font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 8)
                     } else {
-                        sessionCards(activeSessions)
-                    }
-
-                    if !startFreshSessions.isEmpty {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { startFreshExpanded.toggle() }
-                        } label: {
-                            HStack {
-                                Label(L("Start fresh before continuing"), systemImage: "shield.lefthalf.filled")
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Text(L("Before you resume"))
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Image(systemName: startFreshExpanded ? "chevron.up" : "chevron.down")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.plain)
-                        if startFreshExpanded {
-                            sessionCards(startFreshSessions)
-                        }
-                    }
-
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { recentExpanded.toggle() }
-                    } label: {
-                        HStack {
-                            sectionHeader(L("Safe to resume"), count: recentSessions.count, note: L("Healthy context"))
-                            Image(systemName: recentExpanded ? "chevron.up" : "chevron.down")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    if recentExpanded { sessionCards(recentSessions) }
-
-                    if activeSessions.isEmpty && startFreshSessions.isEmpty && recentSessions.isEmpty {
-                        ContentUnavailableView(
-                            L("Your guardian is taking a break"),
-                            systemImage: "moon.zzz",
-                            description: Text(L("No unarchived Codex sessions to display")))
-                            .frame(height: 180)
+                        sessionCards(sessions)
                     }
                 }
                 .padding(16)
@@ -1216,6 +1049,13 @@ private struct DashboardView: View {
             .buttonStyle(.borderless)
             .help(darkMode ? L("Use light appearance") : L("Use dark appearance"))
 
+            Button(action: quickRestart) {
+                Label(L("Quick restart"), systemImage: "arrow.clockwise.circle")
+            }
+            .buttonStyle(.borderless)
+            .help(L("Restart the guardian without changing session data"))
+            .accessibilityLabel(L("Quick restart"))
+
             Button { model.requestManualRefresh() } label: {
                 if model.isManualRefreshing {
                     ProgressView().controlSize(.small)
@@ -1244,6 +1084,29 @@ private struct DashboardView: View {
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
+
+    private func quickRestart() {
+        let bundleURL = Bundle.main.bundleURL
+        guard bundleURL.pathExtension == "app" else {
+            model.errorMessage = L("Quick restart is available in the installed app.")
+            return
+        }
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = [
+            "-c",
+            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; /usr/bin/open -n \"$2\"",
+            "codex-session-guardian-restart",
+            "\(ProcessInfo.processInfo.processIdentifier)",
+            bundleURL.path,
+        ]
+        do {
+            try relaunch.run()
+            NSApplication.shared.terminate(nil)
+        } catch {
+            model.errorMessage = LF("Could not restart the guardian: %@", error.localizedDescription)
+        }
+    }
 
     @ViewBuilder private func sessionCards(_ sessions: [SessionSummary]) -> some View {
         ForEach(sessions, id: \.renderIdentity) { session in
@@ -1286,26 +1149,6 @@ private struct RoutingPreferenceCard: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let recommendation = RoutingRecommendationEngine.nextTaskRecommendation(
-                profile: profile,
-                evaluations: samples,
-                outcomes: outcomes) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(nextTaskRecommendationTitle(recommendation))
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.primary)
-                    Text(nextTaskRecommendationEvidence(recommendation))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(nextTaskUpgradeCondition(recommendation))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(9)
-                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-            }
-
             ForEach(profile.routes, id: \.lane.rawValue) { route in
                 HStack(spacing: 10) {
                     Image(systemName: laneIcon(route.lane))
@@ -1329,7 +1172,7 @@ private struct RoutingPreferenceCard: View {
                 }
             }
 
-            Text(L("Initial defaults come from official guidance and your local routing skill. Local evaluation evidence updates the next-task recommendation; running tasks are never switched in place."))
+            Text(L("This panel records route baselines and local comparison evidence. It does not predict your next task or switch a running task."))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -1380,7 +1223,7 @@ private struct RoutingPreferenceCard: View {
         case .withdrawn:
             return LF("Keep %@ · candidate failed quality", route.reasoningEffort)
         case .personalizationReady:
-            return LF("Personal recommendation ready: %@", comparison)
+            return LF("%@ comparison verified locally", comparison)
         case .qualityObserving:
             return LF("%@ quality: %lld/%lld verified", comparison, online.verifiedSuccesses, online.requiredSuccesses)
         case .trialReady, .notEligible:
@@ -1388,15 +1231,15 @@ private struct RoutingPreferenceCard: View {
         }
         switch gate.state {
         case .candidateTrialReady:
-            return LF("Try %@ next · %.0f%% fewer Tokens", comparison, gate.tokenSavingsRatio * 100)
+            return LF("%@ comparison · %.0f%% fewer Tokens", comparison, gate.tokenSavingsRatio * 100)
         case .candidateReadyForPersonalization:
-            return LF("Personal recommendation ready: %@", comparison)
+            return LF("%@ comparison verified locally", comparison)
         case .candidateFailedQuality:
             return LF("Keep %@ · candidate failed quality", route.reasoningEffort)
         case .noMeasuredEfficiencyGain:
             return LF("Keep %@ · no measured gain", route.reasoningEffort)
         case .insufficientComparableSamples:
-            return LF("Next comparison: %@", comparison)
+            return LF("Pending comparison: %@", comparison)
         }
     }
 
@@ -1421,124 +1264,6 @@ private struct RoutingPreferenceCard: View {
         }
     }
 
-    private func nextTaskRecommendationTitle(_ recommendation: RoutingNextTaskRecommendation) -> String {
-        let model = shortModel(recommendation.model)
-        switch recommendation.confidenceState {
-        case .personalizationReady:
-            return LF("Personal recommendation · %@/%@", model, recommendation.candidateEffort)
-        case .qualityObserving, .trialReady:
-            return LF("Next suitable task · try %@/%@", model, recommendation.candidateEffort)
-        case .notEligible, .withdrawn:
-            return LF("Keep %@/%@", model, recommendation.baselineEffort)
-        }
-    }
-
-    private func nextTaskRecommendationEvidence(_ recommendation: RoutingNextTaskRecommendation) -> String {
-        LF(
-            "Controlled comparison used %.0f%% fewer Tokens · real quality %lld/%lld",
-            recommendation.measuredTokenSavingsRatio * 100,
-            recommendation.verifiedSuccesses,
-            recommendation.requiredSuccesses)
-    }
-
-    private func nextTaskUpgradeCondition(_ recommendation: RoutingNextTaskRecommendation) -> String {
-        switch recommendation.upgradeConditionCode {
-        case "upgrade_if_contract_not_frozen_or_acceptance_not_mechanical":
-            return L("Use only for frozen, mechanically verifiable work; otherwise keep the current baseline.")
-        case "upgrade_if_judgment_risk_or_repair_cost_is_material":
-            return L("Keep the current baseline when judgment or repair risk is material.")
-        default:
-            return L("Keep the current baseline when frontier capability is required.")
-        }
-    }
-}
-
-private struct GuardianInboxCard: View {
-    @ObservedObject var model: DashboardModel
-    @Binding var expanded: Bool
-
-    private var visibleItems: [GuardianInboxItem] {
-        Array(model.inboxState.items.prefix(5))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "tray.full.fill").foregroundStyle(.orange)
-                    Text(L("Guardian Inbox")).font(.subheadline.weight(.bold))
-                    if model.inboxState.unreadCount > 0 {
-                        Text("\(model.inboxState.unreadCount)")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(.orange, in: Capsule())
-                    }
-                    Spacer()
-                    Text(L("Attention events"))
-                        .font(.caption2).foregroundStyle(.secondary)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-
-            if expanded {
-                if visibleItems.isEmpty {
-                    Text(L("No attention events yet"))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 3)
-                } else {
-                    ForEach(visibleItems) { item in
-                        Button { model.openInboxItem(item) } label: {
-                            HStack(alignment: .top, spacing: 9) {
-                                Image(systemName: guardianInboxIcon(item.kind))
-                                    .foregroundStyle(guardianInboxColor(item.kind))
-                                    .frame(width: 18)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Text(guardianInboxTitle(item.kind))
-                                            .font(.caption.weight(.bold))
-                                        if !item.isRead {
-                                            Circle().fill(.orange).frame(width: 6, height: 6)
-                                        }
-                                        Spacer()
-                                        Text(relativeDate(item.occurredAt))
-                                            .font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(item.sessionTitle)
-                                        .font(.caption).foregroundStyle(.primary).lineLimit(1)
-                                    Text(item.publicSummary ?? guardianInboxDescription(item.kind))
-                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                            .padding(8)
-                            .background(
-                                item.isRead ? Color.clear : Color.orange.opacity(0.07),
-                                in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                if model.inboxState.unreadCount > 0 {
-                    Button(L("Mark all as read")) { model.markAllInboxRead() }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-        }
-        .padding(13)
-        .background(
-            Color(nsColor: .controlBackgroundColor).opacity(0.72),
-            in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.12)))
-    }
 }
 
 private struct ExecutionWasteCalibrationCard: View {
@@ -1851,13 +1576,15 @@ private struct NativePetDragSurface: NSViewRepresentable {
     let onDragBegan: () -> Void
     let onDragEnded: (Bool) -> Void
     let onDoubleClick: () -> Void
+    let onRightClick: () -> Void
 
     func makeNSView(context: Context) -> NativePetDragView {
         NativePetDragView(
             onHover: onHover,
             onDragBegan: onDragBegan,
             onDragEnded: onDragEnded,
-            onDoubleClick: onDoubleClick)
+            onDoubleClick: onDoubleClick,
+            onRightClick: onRightClick)
     }
 
     func updateNSView(_ view: NativePetDragView, context: Context) {
@@ -1865,6 +1592,7 @@ private struct NativePetDragSurface: NSViewRepresentable {
         view.onDragBegan = onDragBegan
         view.onDragEnded = onDragEnded
         view.onDoubleClick = onDoubleClick
+        view.onRightClick = onRightClick
     }
 }
 
@@ -1873,6 +1601,7 @@ private final class NativePetDragView: NSView {
     var onDragBegan: () -> Void
     var onDragEnded: (Bool) -> Void
     var onDoubleClick: () -> Void
+    var onRightClick: () -> Void
     private var trackingArea: NSTrackingArea?
     private var dragActive = false
     private var pointerInside = false
@@ -1882,12 +1611,14 @@ private final class NativePetDragView: NSView {
         onHover: @escaping (Bool) -> Void,
         onDragBegan: @escaping () -> Void,
         onDragEnded: @escaping (Bool) -> Void,
-        onDoubleClick: @escaping () -> Void
+        onDoubleClick: @escaping () -> Void,
+        onRightClick: @escaping () -> Void
     ) {
         self.onHover = onHover
         self.onDragBegan = onDragBegan
         self.onDragEnded = onDragEnded
         self.onDoubleClick = onDoubleClick
+        self.onRightClick = onRightClick
         super.init(frame: .zero)
     }
 
@@ -1962,6 +1693,12 @@ private final class NativePetDragView: NSView {
         updateHover(bounds.contains(convert(windowPoint, from: nil)))
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        pendingSingleClick?.cancel()
+        pendingSingleClick = nil
+        onRightClick()
+    }
+
     private func updateHover(_ inside: Bool) {
         guard pointerInside != inside else { return }
         pointerInside = inside
@@ -2006,6 +1743,9 @@ private final class FloatingPetController {
             onNativeDragEnded: { [weak self] in
                 self?.nativeDragEnded()
             },
+            onToggleVisibility: { [weak self] in
+                self?.toggleVisibility()
+            },
             isPointerInsidePanel: { [weak hoverPanel] in
                 guard let hoverPanel else { return false }
                 return hoverPanel.frame.contains(NSEvent.mouseLocation)
@@ -2023,6 +1763,12 @@ private final class FloatingPetController {
         } else {
             panel.orderOut(nil)
         }
+    }
+
+    private func toggleVisibility() {
+        let next = !FloatingPetPreference.isVisible
+        FloatingPetPreference.setVisible(next)
+        setVisible(next)
     }
 
     func refreshPlacementAfterLaunch() {
@@ -2088,10 +1834,10 @@ private final class FloatingPetController {
         case .collapsed:
             size = collapsedSize
         case .stacked:
-            size = NSSize(width: 640, height: sessionCount == 1 ? 330 : 350)
+            size = NSSize(width: 640, height: sessionCount == 1 ? 370 : 390)
         case .spread:
             let visibleCards = min(4, max(1, sessionCount))
-            size = NSSize(width: 640, height: min(760, 130 + CGFloat(visibleCards) * 146))
+            size = NSSize(width: 640, height: min(796, 166 + CGFloat(visibleCards) * 146))
         }
         if petAnchor == .zero { petAnchor = NSPoint(x: panel.frame.maxX, y: panel.frame.minY) }
         let screenFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
@@ -2142,6 +1888,7 @@ private struct FloatingPetView: View {
     @ObservedObject var model: DashboardModel
     let onLayoutChange: (FloatingPanelMode, Int) -> Void
     let onNativeDragEnded: () -> Void
+    let onToggleVisibility: () -> Void
     let isPointerInsidePanel: () -> Bool
     @State private var mode: FloatingPanelMode = .collapsed
     @State private var pinned = false
@@ -2255,6 +2002,20 @@ private struct FloatingPetView: View {
         ZStack(alignment: .bottomTrailing) {
             if mode != .collapsed {
                 VStack(alignment: .trailing, spacing: 10) {
+                    HStack {
+                        Text(L("Active task cards"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.62))
+                        Spacer()
+                        Button(action: collapse) {
+                            Label(L("Collapse cards"), systemImage: "rectangle.compress.vertical")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(.white.opacity(0.18))
+                        .help(L("Collapse floating task cards"))
+                    }
+                    .frame(width: 556)
                     if let warning = model.resumeWarning {
                         FloatingResumeWarningCard(session: warning, model: model)
                     } else if displayedSessions.isEmpty {
@@ -2363,7 +2124,8 @@ private struct FloatingPetView: View {
                     },
                     onDoubleClick: {
                         playDoubleClickReaction()
-                    })
+                    },
+                    onRightClick: onToggleVisibility)
 
                 if let speechKey, !dragInProgress {
                     XiaoxinSpeechBubble(text: L(speechKey))
@@ -2458,14 +2220,6 @@ private struct FloatingPetView: View {
         .onChange(of: model.migrationCompletionTick) { _, _ in
             showSpeech(for: .success, bypassMinimumGap: true)
         }
-        .onChange(of: model.calibrationSpeechTick) { _, _ in
-            guard let outcome = model.calibrationSpeechOutcome else { return }
-            showSpeech(
-                for: outcome == .semanticContinuityReady
-                    ? .calibrationReady : .calibrationContinueShadow,
-                bypassMinimumGap: true,
-                bypassRepeatCooldown: true)
-        }
         .onChange(of: speechIntensityRawValue) { _, _ in
             if speechIntensity == .off {
                 speechGeneration &+= 1
@@ -2499,7 +2253,7 @@ private struct FloatingPetView: View {
     }
 
     private func observeLiveActivity() {
-        guard let latest = model.liveActivities.values.max(by: { $0.updatedAt < $1.updatedAt }),
+        guard let (sessionID, latest) = model.liveActivities.max(by: { $0.value.updatedAt < $1.value.updatedAt }),
               abs(Date().timeIntervalSince(latest.updatedAt)) < 5
         else { return }
 
@@ -2515,10 +2269,23 @@ private struct FloatingPetView: View {
             return
         }
 
+        if latest.kind.needsUserAttention {
+            presentAttention(for: sessionID)
+        }
+
         showSpeech(
             for: latest.kind.speechContext,
             minimumGap: 12,
             bypassMinimumGap: latest.kind.needsUserAttention)
+    }
+
+    private func presentAttention(for sessionID: String) {
+        guard let session = model.snapshot.sessions.first(where: { $0.sessionID == sessionID }) else { return }
+        invalidatePendingCollapse()
+        frozenSessions = [session] + model.snapshot.activeSessions.filter { $0.sessionID != sessionID }
+        pinned = true
+        mode = .stacked
+        onLayoutChange(.stacked, max(1, displayedSessions.count))
     }
 
     private func showSpeech(
@@ -3263,52 +3030,6 @@ private func liveActivityColor(_ kind: LiveActivityKind) -> Color {
     }
 }
 
-private func guardianInboxTitle(_ kind: GuardianInboxKind) -> String {
-    switch kind {
-    case .waitingForUser: L("Waiting for your action")
-    case .failed: L("Task needs attention")
-    case .completed: L("Task completed")
-    case .healthWatch: L("Session health needs watching")
-    case .healthCritical: L("Session should start fresh")
-    case .calibrationReady: L("Calibration target reached")
-    case .calibrationContinueShadow: L("Calibration needs more shadow samples")
-    }
-}
-
-private func guardianInboxDescription(_ kind: GuardianInboxKind) -> String {
-    switch kind {
-    case .waitingForUser: L("Codex is waiting for an approval or answer.")
-    case .failed: L("The latest turn failed or stopped unexpectedly.")
-    case .completed: L("The task produced a final public response.")
-    case .healthWatch: L("Context pressure or compaction entered the watch range.")
-    case .healthCritical: L("Context health reached the start-fresh threshold.")
-    case .calibrationReady: L("Precision and reason coverage are ready for semantic continuity work.")
-    case .calibrationContinueShadow: L("The sample gate is complete, but precision is below the target.")
-    }
-}
-
-private func guardianInboxIcon(_ kind: GuardianInboxKind) -> String {
-    switch kind {
-    case .waitingForUser: "person.crop.circle.badge.questionmark"
-    case .failed: "xmark.octagon.fill"
-    case .completed: "checkmark.circle.fill"
-    case .healthWatch: "eye.fill"
-    case .healthCritical: "exclamationmark.shield.fill"
-    case .calibrationReady: "checkmark.seal.fill"
-    case .calibrationContinueShadow: "chart.line.text.clipboard"
-    }
-}
-
-private func guardianInboxColor(_ kind: GuardianInboxKind) -> Color {
-    switch kind {
-    case .waitingForUser, .healthWatch: .orange
-    case .failed, .healthCritical: .red
-    case .completed: .green
-    case .calibrationReady: .green
-    case .calibrationContinueShadow: .orange
-    }
-}
-
 private func shortRoutingModel(_ model: String) -> String {
     model.replacingOccurrences(of: "gpt-5.6-", with: "")
 }
@@ -3335,7 +3056,7 @@ private func routingPreflightReason(_ reasonCode: String) -> String {
 private func postflightTitle(_ assessment: RoutingPostflightAssessment) -> String {
     switch assessment.quality {
     case .passed: return L("Quality passed · route retained")
-    case .failed: return L("Quality did not pass · upgrade next similar task")
+    case .failed: return L("Quality did not pass · review task contract")
     case .insufficientEvidence: return L("Task completed · quality not yet proven")
     }
 }
@@ -3346,14 +3067,8 @@ private func postflightDetail(_ assessment: RoutingPostflightAssessment) -> Stri
         return L("Quality passed first; Token and duration are now eligible for comparison.")
     case .requireVerification:
         return L("Completion alone is not success. Add tests or explicit acceptance before learning from it.")
-    case .upgradeNextSimilarTask:
-        guard let next = assessment.recommendedNext else {
-            return L("The frontier route also missed quality; review the task contract before retrying.")
-        }
-        return LF(
-            "Next similar task: %@/%@. Rework cost is counted against this route.",
-            shortRoutingModel(next.model),
-            next.reasoningEffort)
+    case .reviewTaskContract:
+        return L("Review this task contract before retrying; no configuration is inferred for a future task.")
     }
 }
 
