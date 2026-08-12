@@ -513,6 +513,9 @@ public final class SQLiteStore: @unchecked Sendable {
         let labels = try executionWasteReviewLabels()
         let labelsByObservation = Dictionary(grouping: labels, by: \.observationID)
         return observations.compactMap { observation in
+            guard observation.policyVersion == ExecutionWasteObservation.currentPolicyVersion else {
+                return nil
+            }
             let item = ExecutionWasteReviewItem(
                 observation: observation,
                 labels: (labelsByObservation[observation.id] ?? []).sorted {

@@ -57,7 +57,7 @@ public struct ExecutionWasteEvidence: Codable, Equatable, Sendable {
 /// turn identifiers, paths, prompts, commands, tool arguments, and tool output.
 public struct ExecutionWasteObservation: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 2
-    public static let currentPolicyVersion = "execution-waste-v1"
+    public static let currentPolicyVersion = "execution-waste-v1.1"
 
     public var schemaVersion: Int
     public var id: String
@@ -307,7 +307,6 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         let name = rawName.lowercased()
         let rawInput = operationInput(payload)
         let command = extractExecCommand(from: rawInput)
-        let identityInput = command ?? rawInput
         let liveKind = LiveActivityParser.kind(forToolNamed: name)
         let kind: OperationKind
         if liveKind == .readingFile || command.map(isConservativeReadCommand) == true {
@@ -315,7 +314,10 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         } else {
             kind = .other
         }
-        return ("\(name)|\(identityInput)", kind)
+        // Keep the complete structured input in the fingerprint. Execution
+        // conditions such as sandbox escalation, cwd, and TTY are meaningful
+        // changes even when the nested command text is identical.
+        return ("\(name)|\(rawInput)", kind)
     }
 
     private static func operationInput(_ payload: [String: Any]) -> String {

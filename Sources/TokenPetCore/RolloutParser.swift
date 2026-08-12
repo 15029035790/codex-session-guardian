@@ -1,7 +1,7 @@
 import Foundation
 
 public struct RolloutState: Codable, Equatable, Sendable {
-    public static let currentClassificationVersion = 6
+    public static let currentClassificationVersion = 7
 
     public var sessionID: String?
     public var cwd = ""

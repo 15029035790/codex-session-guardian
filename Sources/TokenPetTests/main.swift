@@ -259,6 +259,24 @@ func testExecutionWasteShadowLedger() throws {
         changedRetry.executionWasteProfile?.unchangedRetryCount,
         0,
         "changed retry input is not an unchanged retry")
+    let restrictedWrapper = #"const r = await tools.exec_command({"cmd":"swift build PRIVATE_WRAPPED_TARGET","workdir":"/private/workspace"}); text(r.output);"#
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "restricted-wrapper",
+        "input": restrictedWrapper,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call_output", "call_id": "restricted-wrapper",
+        "output": "Process exited with code 1\nPRIVATE_SANDBOX_FAILURE",
+    ]))
+    let escalatedWrapper = #"const r = await tools.exec_command({"cmd":"swift build PRIVATE_WRAPPED_TARGET","workdir":"/private/workspace","sandbox_permissions":"require_escalated"}); text(r.output);"#
+    let recovered = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "escalated-wrapper",
+        "input": escalatedWrapper,
+    ]))!
+    try expect(
+        recovered.executionWasteProfile?.unchangedRetryCount,
+        0,
+        "sandbox escalation changes the execution operation fingerprint")
     _ = state.process(line: event(type: "response_item", payload: [
         "type": "function_call", "name": "exec_command", "call_id": "retry-2",
         "arguments": privateRetryArguments,
@@ -285,6 +303,7 @@ func testExecutionWasteShadowLedger() throws {
     let activeEncoding = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
     try expect(activeEncoding.contains("Secret.swift"), false, "active tracker hashes read target")
     try expect(activeEncoding.contains("PRIVATE_TARGET"), false, "active tracker hashes retry command")
+    try expect(activeEncoding.contains("PRIVATE_WRAPPED_TARGET"), false, "active tracker hashes wrapped execution context")
     try expect(activeEncoding.contains("PRIVATE_SHELL_PATH"), false, "active tracker hashes wrapped read command")
     try expect(activeEncoding.contains("PRIVATE_TOOL_OUTPUT"), false, "active tracker excludes tool output")
 
@@ -368,7 +387,7 @@ func testExecutionWasteShadowLedger() throws {
     let persistedJSON = String(decoding: try JSONEncoder().encode(observation), as: UTF8.self)
     for secret in [
         "private-session", "private-turn", "/private/workspace", "Secret.swift",
-        "PRIVATE_TARGET", "PRIVATE_SHELL_PATH", "PRIVATE_MIXED", "PRIVATE_ARGUMENT",
+        "PRIVATE_TARGET", "PRIVATE_WRAPPED_TARGET", "PRIVATE_SHELL_PATH", "PRIVATE_MIXED", "PRIVATE_ARGUMENT",
         "PRIVATE_TOOL_OUTPUT", "PRIVATE_FAILURE",
     ] {
         try expect(persistedJSON.contains(secret), false, "ledger excludes private value \(secret)")
@@ -384,6 +403,10 @@ func testExecutionWasteShadowLedger() throws {
         try store.executionWasteObservations(limit: 10, onlyWithEvidence: true),
         [observation],
         "evidence-only shadow query")
+    var priorPolicyObservation = observation
+    priorPolicyObservation.id = String(repeating: "a", count: 64)
+    priorPolicyObservation.policyVersion = "execution-waste-v1"
+    try store.upsertExecutionWasteObservation(priorPolicyObservation)
 
     var invalidRationaleRejected = false
     do {
@@ -473,11 +496,11 @@ func testExecutionWasteShadowLedger() throws {
     cleanTurn.executionWasteProfile = ExecutionWasteProfile()
     let clean = ExecutionWasteObservation.derive(from: cleanTurn)!
     try store.upsertExecutionWasteObservation(clean)
-    try expect(try store.executionWasteObservations(limit: 10).count, 2, "negative samples retained")
+    try expect(try store.executionWasteObservations(limit: 10).count, 3, "negative and prior-policy samples retained")
     try expect(
         try store.executionWasteObservations(limit: 10, onlyWithEvidence: true).count,
-        1,
-        "evidence filter excludes clean samples")
+        2,
+        "evidence filter excludes clean samples but retains prior policy history")
     var unobservedReasonRejected = false
     do {
         let invalid = try ExecutionWasteReviewLabel(
