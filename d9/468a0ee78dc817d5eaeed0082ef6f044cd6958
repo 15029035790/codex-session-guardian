@@ -1,0 +1,37 @@
+README.md
+  s_aa42e25b43f022::t_1b687e730546c1 140-142,145
+README.zh-CN.md
+  s_aa42e25b43f022::t_c88e05ed6619e7 130-132,135
+Sources/TokenPetCLI/main.swift
+  s_aa42e25b43f022::t_27f27c6f854564 343-403
+Sources/TokenPetCore/ExecutionWaste.swift
+  s_aa42e25b43f022::t_19847ee7e9209b 10-29,37,59,73,121,134,144-149,156,161,163,165,171,175,177-185,187-193,195,197-205,210-211,226-234,239-243,253-261,271-273,277,279,294-302
+Sources/TokenPetCore/ExecutionWasteReview.swift
+  s_aa42e25b43f022::t_ceeee592301a18 1-203
+Sources/TokenPetCore/RolloutParser.swift
+  s_aa42e25b43f022::t_25399abd1c59d1 4
+Sources/TokenPetCore/SQLiteStore.swift
+  s_aa42e25b43f022::t_217add8a690288 121-132,405-415,423-426,451-537
+Sources/TokenPetTests/main.swift
+  s_aa42e25b43f022::t_c2783754c595b5 298-313,333-355,360-367,388-469,481-501
+docs/TOKEN_EFFICIENCY_STRATEGY.md
+  s_aa42e25b43f022::t_eee5227d6bb9dc 384-391
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d9468a0ee78dc817d5eaeed0082ef6f044cd6958",
+  "prompts": {},
+  "sessions": {
+    "s_aa42e25b43f022": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff4f2-9e2c-7b21-a771-d43497dc4b2a",
+        "model": "unknown"
+      },
+      "human_author": "Tangziwen <29474333+15029035790@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
