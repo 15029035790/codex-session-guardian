@@ -40,6 +40,19 @@ public enum CodexDesktopTurnReplay {
     }
 }
 
+public enum CodexDesktopTaskControl {
+    public static func interrupt(
+        sessionID: String,
+        turnID: String,
+        timeout: TimeInterval = 10
+    ) throws {
+        let desktop = try CodexDesktopIPCClient(timeout: timeout)
+        defer { desktop.stop() }
+        let owner = try desktop.findThreadOwner(sessionID)
+        try desktop.interruptConversation(sessionID, turnID: turnID, ownerID: owner)
+    }
+}
+
 enum CodexDesktopIPCError: LocalizedError {
     case unavailable(String)
     case invalidResponse(String)

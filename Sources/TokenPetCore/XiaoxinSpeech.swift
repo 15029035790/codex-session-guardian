@@ -29,6 +29,8 @@ public enum XiaoxinSpeechContext: Equatable, Sendable {
     case doubleClick
     case calibrationReady
     case calibrationContinueShadow
+    case executionAdvisory
+    case configurationHookStale
 }
 
 public struct XiaoxinSpeechLine: Equatable, Sendable {
@@ -166,6 +168,10 @@ public enum XiaoxinSpeechCatalog {
             [XiaoxinSpeechLine("pet.speech.calibration.ready")]
         case .calibrationContinueShadow:
             [XiaoxinSpeechLine("pet.speech.calibration.continue_shadow")]
+        case .executionAdvisory:
+            [XiaoxinSpeechLine("pet.speech.execution_advisory")]
+        case .configurationHookStale:
+            [XiaoxinSpeechLine("pet.speech.configuration_hook_stale")]
         }
     }
 }

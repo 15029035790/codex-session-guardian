@@ -227,6 +227,10 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
     public var reasoningEffort: String?
     public var executionProfile: TurnExecutionProfile?
     public var executionWasteProfile: ExecutionWasteProfile?
+    public var agentDispatches: [AgentDispatchRecord]?
+    public var isSubagent: Bool?
+    public var parentThreadID: String?
+    public var agentPath: String?
     public var startedAt: Date?
     public var completedAt: Date?
     public var status: TurnStatus
@@ -267,6 +271,10 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
         self.reasoningEffort = nil
         self.executionProfile = nil
         self.executionWasteProfile = nil
+        self.agentDispatches = nil
+        self.isSubagent = nil
+        self.parentThreadID = nil
+        self.agentPath = nil
         self.startedAt = startedAt
         self.completedAt = nil
         self.status = status

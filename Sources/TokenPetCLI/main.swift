@@ -548,6 +548,35 @@ if arguments.contains("--token-audit") {
     }
 }
 
+if arguments.contains("--multi-agent-audit") {
+    do {
+        let store = try SQLiteStore(path: database)
+        let scanner = SessionScanner(store: store, codexHome: home)
+        let days = max(1, option("--multi-agent-audit-days").flatMap(Int.init) ?? 7)
+        let since = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+        let scan = try scanner.indexHistory(since: since)
+        let findings = MultiAgentAuditPolicy.evaluate(turns: try store.turns(limit: max(limit, 2_000)))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let findingsObject = try JSONSerialization.jsonObject(with: encoder.encode(findings))
+        let payload: [String: Any] = [
+            "lookbackDays": days,
+            "scan": [
+                "files": scan.scannedFiles,
+                "bytesRead": scan.bytesRead,
+                "changedTurns": scan.changedTurns,
+            ],
+            "findings": findingsObject,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+        exit(0)
+    } catch {
+        fputs("token-pet-cli: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 do {
     let store = try SQLiteStore(path: database)
     let scanner = SessionScanner(store: store, codexHome: home)

@@ -1053,6 +1053,123 @@ func testSubagentFilteringAndMigration() throws {
         Set(try scanner.snapshot().sessions.map(\.sessionID)),
         Set(["top", "user-child"]),
         "only explicitly marked subagents excluded")
+    let storedSubagent = try store.turns(limit: 20).first { $0.sessionID == "sub" }
+    try expect(storedSubagent?.isSubagent, true, "subagent remains indexed for execution audit")
+}
+
+func testMultiAgentExecutionAudit() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    var parent = TurnRecord(
+        sessionID: "parent", turnID: "parent-turn", ordinal: 1,
+        cwd: "/project", startedAt: now)
+    parent.agentDispatches = [AgentDispatchRecord(
+        taskName: "start_iter2_readiness",
+        agentType: "worker",
+        forkTurns: "all",
+        model: nil,
+        reasoningEffort: nil,
+        occurredAt: now.addingTimeInterval(1))]
+
+    var child = TurnRecord(
+        sessionID: "child", turnID: "child-turn", ordinal: 1,
+        cwd: "/project", startedAt: now.addingTimeInterval(2))
+    child.isSubagent = true
+    child.parentThreadID = "parent"
+    child.agentPath = "/root/start_iter2_readiness"
+    child.usage = TokenUsage(raw: [
+        "input_tokens": 12_000_000,
+        "cached_input_tokens": 9_000_000,
+        "output_tokens": 100_000,
+        "reasoning_output_tokens": 50_000,
+        "total_tokens": 12_100_000,
+    ])
+
+    let activeFindings = MultiAgentAuditPolicy.evaluate(turns: [parent, child])
+    try expect(
+        Set(activeFindings.map(\.reason)),
+        Set([.genericWorkerInheritedFullHistory, .largeTokenBurn]),
+        "generic full-history worker and token burn are attributed")
+    try expect(
+        Set(activeFindings.map(\.severity)),
+        Set([.considerInterrupting]),
+        "active high-confidence waste can suggest interruption")
+
+    child.status = .completed
+    child.completedAt = now.addingTimeInterval(10)
+    let completedFindings = MultiAgentAuditPolicy.evaluate(turns: [parent, child])
+    try expect(
+        Set(completedFindings.map(\.severity)),
+        Set([.reviewAfterCompletion]),
+        "completed work becomes postflight advice")
+
+    parent.agentDispatches?[0].forkTurns = "none"
+    child.usage = TokenUsage()
+    try expect(
+        MultiAgentAuditPolicy.evaluate(turns: [parent, child]).isEmpty,
+        true,
+        "bounded context without token burn stays quiet")
+
+    var parsed = RolloutState()
+    _ = parsed.process(line: event(type: "session_meta", payload: ["id": "parser-parent", "cwd": "/project"]))
+    _ = parsed.process(line: event(type: "event_msg", payload: ["type": "task_started", "turn_id": "turn"]))
+    let dispatch = parsed.process(line: event(type: "response_item", payload: [
+        "type": "function_call",
+        "name": "spawn_agent",
+        "arguments": #"{"task_name":"bounded","agent_type":"luna_worker","fork_turns":"none"}"#,
+    ]))
+    try expect(dispatch?.agentDispatches?.first?.taskName, "bounded", "spawn_agent dispatch is parsed")
+    try expect(dispatch?.agentDispatches?.first?.forkTurns, "none", "fork scope is preserved")
+
+    var childState = RolloutState()
+    let parsedChild = childState.process(line: event(type: "session_meta", payload: [
+        "id": "parser-child",
+        "cwd": "/project",
+        "parent_thread_id": "parser-parent",
+        "source": ["subagent": ["thread_spawn": ["agent_path": "/root/bounded"]]],
+    ]))
+    _ = parsedChild
+    let childTurn = childState.process(line: event(type: "event_msg", payload: [
+        "type": "task_started", "turn_id": "child-turn",
+    ]))
+    try expect(childTurn?.isSubagent, true, "child session classification is preserved")
+    try expect(childTurn?.agentPath, "/root/bounded", "child agent path is preserved")
+
+    var inheritedHistoryState = RolloutState()
+    _ = inheritedHistoryState.process(line: event(type: "session_meta", payload: [
+        "id": "real-child", "parent_thread_id": "real-parent",
+        "source": ["subagent": ["thread_spawn": ["agent_path": "/root/bounded"]]],
+    ]))
+    _ = inheritedHistoryState.process(line: event(type: "session_meta", payload: [
+        "id": "real-parent", "source": "vscode",
+    ]))
+    let inheritedTurn = inheritedHistoryState.process(line: event(type: "event_msg", payload: [
+        "type": "task_started", "turn_id": "inherited-turn",
+    ]))
+    try expect(inheritedTurn?.sessionID, "real-child", "inherited parent metadata cannot replace child identity")
+    try expect(inheritedTurn?.isSubagent, true, "inherited parent metadata cannot erase child classification")
+}
+
+func testConfigurationHookHealth() throws {
+    let installedAt = Date(timeIntervalSince1970: 1_800_000_000)
+    try expect(
+        ConfigurationHookHealth.evaluate(
+            installed: false, hookModifiedAt: nil, latestPreflightAt: nil,
+            latestUserTurnAt: nil, now: installedAt),
+        .notInstalled,
+        "missing configuration hook")
+    try expect(
+        ConfigurationHookHealth.evaluate(
+            installed: true, hookModifiedAt: installedAt, latestPreflightAt: nil,
+            latestUserTurnAt: installedAt.addingTimeInterval(20), now: installedAt.addingTimeInterval(120)),
+        .staleAfterInstallation,
+        "post-install user activity without hook events is diagnosed")
+    try expect(
+        ConfigurationHookHealth.evaluate(
+            installed: true, hookModifiedAt: installedAt,
+            latestPreflightAt: installedAt.addingTimeInterval(30),
+            latestUserTurnAt: installedAt.addingTimeInterval(20), now: installedAt.addingTimeInterval(120)),
+        .healthy,
+        "post-install hook event proves the chain")
 }
 
 func testSidebarIndexedCoverage() throws {
@@ -2500,6 +2617,8 @@ let tests: [(String, () throws -> Void)] = [
     ("incremental tail and archive move", testIncrementalAndArchive),
     ("cross-project isolation", testProjectIsolation),
     ("subagent filtering and migration", testSubagentFilteringAndMigration),
+    ("multi-agent execution audit", testMultiAgentExecutionAudit),
+    ("configuration hook health", testConfigurationHookHealth),
     ("sidebar-indexed coverage", testSidebarIndexedCoverage),
     ("session health, grouping, and activity", testSessionHealthAndActivity),
     ("pet animation event mapping", testPetAnimationState),

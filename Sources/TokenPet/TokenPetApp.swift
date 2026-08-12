@@ -5,7 +5,7 @@ import SwiftUI
 import TokenPetCore
 
 private enum AppVersion {
-    static let label = "v0.2.0"
+    static let label = "v0.3.0"
     static let displayName = "Codex Session Guardian"
 }
 
@@ -249,6 +249,12 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var manualRefreshCompletionTick = 0
     @Published private(set) var liveActivities: [String: SessionLiveActivity] = [:]
     @Published private(set) var executionWasteAccuracy: ExecutionWasteAccuracySummary?
+    @Published private(set) var multiAgentFindings: [MultiAgentAuditFinding] = []
+    @Published private(set) var activeExecutionAdvisory: MultiAgentAuditFinding?
+    @Published private(set) var executionAdvisoryTick = 0
+    @Published private(set) var configurationHookHealth: ConfigurationHookHealth = .awaitingFirstEvent
+    @Published private(set) var configurationHookHealthTick = 0
+    @Published private(set) var configurationHookNoticeDismissed = false
     @Published private(set) var routingPreferenceProfile: RoutingPreferenceProfile?
     @Published private(set) var routingEvaluationSamples: [RoutingEvaluationSample] = []
     @Published private(set) var routingOutcomes: [RoutingOutcomeObservation] = []
@@ -270,6 +276,9 @@ final class DashboardModel: ObservableObject {
     private var floatingWorkspaceVisible = false
     private var resumeWarningSuppressions = ResumeWarningSuppressions()
     private var resumeWarningBudget = ResumeWarningBudget()
+    private var suppressedExecutionAdvisoryIDs = Set<String>()
+    private var announcedExecutionAdvisoryIDs = Set<String>()
+    private var announcedStaleConfigurationHook = false
 
     init() {
         Task { @MainActor [weak self] in self?.start() }
@@ -369,17 +378,20 @@ final class DashboardModel: ObservableObject {
             let outcomes = try scanner.store.routingOutcomes(limit: 10_000)
             let preflights = try scanner.store.routingPreflights(limit: 100)
             let wasteAccuracy = try scanner.store.executionWasteAccuracySummary()
+            let auditTurns = try scanner.store.turns(limit: 2_000)
+            let auditFindings = MultiAgentAuditPolicy.evaluate(turns: auditTurns)
             if initial { _ = malloc_zone_pressure_relief(nil, 0) }
-            return (result, next, outcomes, preflights, wasteAccuracy)
+            return (result, next, outcomes, preflights, wasteAccuracy, auditFindings)
         }
         Task { [weak self] in
             do {
-                let (result, next, outcomes, preflights, wasteAccuracy) = try await work.value
+                let (result, next, outcomes, preflights, wasteAccuracy, auditFindings) = try await work.value
                 guard let self else { return }
                 self.activePaths = result.activePaths
                 self.routingOutcomes = outcomes
                 self.routingPreflights = preflights
                 self.executionWasteAccuracy = wasteAccuracy
+                self.synchronizeMultiAgentFindings(auditFindings)
                 if let next {
                     self.recordRoutingPostflights(from: self.snapshot, to: next)
                     self.resumeWarningSuppressions.reconcile(with: next.sessions)
@@ -408,6 +420,7 @@ final class DashboardModel: ObservableObject {
                         self.resumeWarning = resumed
                     }
                     self.snapshot = next
+                    self.refreshConfigurationHookHealth(preflights: preflights, snapshot: next)
                     self.synchronizeLiveActivityMonitor()
                 }
                 self.isIndexing = false
@@ -478,6 +491,43 @@ final class DashboardModel: ObservableObject {
         pendingRoutingReplays.removeValue(forKey: replay.sessionID)
     }
 
+    func continueObserving(_ finding: MultiAgentAuditFinding) {
+        suppressedExecutionAdvisoryIDs.insert(finding.id)
+        if activeExecutionAdvisory?.id == finding.id { activeExecutionAdvisory = nil }
+    }
+
+    func interruptParentTask(for finding: MultiAgentAuditFinding) {
+        guard let turnID = finding.parentTurnID else {
+            errorMessage = L("The parent task has no active turn to interrupt")
+            continueObserving(finding)
+            return
+        }
+        Task { [weak self] in
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    try CodexDesktopTaskControl.interrupt(
+                        sessionID: finding.parentSessionID,
+                        turnID: turnID)
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.continueObserving(finding)
+                self.refresh(forceDiscover: true)
+            case let .failure(error):
+                self.errorMessage = LF("Could not interrupt the parent task: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    func dismissConfigurationHookHealthNotice() {
+        configurationHookNoticeDismissed = true
+    }
+
     private func performReplay(_ replay: PendingRoutingReplay, using selection: RoutingSelection) {
         guard replayingRoutingSessionID == nil else { return }
         replayingRoutingSessionID = replay.sessionID
@@ -540,6 +590,49 @@ final class DashboardModel: ObservableObject {
         liveActivityMonitor.synchronize(pathsBySessionID: paths)
         let visibleIDs = Set(snapshot.sessions.map(\.sessionID))
         liveActivities = liveActivities.filter { visibleIDs.contains($0.key) }
+    }
+
+    private func synchronizeMultiAgentFindings(_ findings: [MultiAgentAuditFinding]) {
+        multiAgentFindings = findings
+        let next = findings.first {
+            $0.isActive &&
+                $0.severity == .considerInterrupting &&
+                !suppressedExecutionAdvisoryIDs.contains($0.id)
+        }
+        activeExecutionAdvisory = next
+        if let next, announcedExecutionAdvisoryIDs.insert(next.id).inserted {
+            executionAdvisoryTick &+= 1
+        }
+    }
+
+    private func refreshConfigurationHookHealth(
+        preflights: [RoutingPreflightObservation],
+        snapshot: DashboardSnapshot
+    ) {
+        let hookURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/hooks.json")
+        let data = try? Data(contentsOf: hookURL)
+        let installed = data.flatMap { String(data: $0, encoding: .utf8) }?
+            .contains("--user-prompt-submit-hook") == true
+        let modifiedAt = try? hookURL.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate
+        let latestUserTurnAt = snapshot.recent
+            .filter { $0.isSubagent != true }
+            .map(\.sortDate)
+            .max()
+        let health = ConfigurationHookHealth.evaluate(
+            installed: installed,
+            hookModifiedAt: modifiedAt,
+            latestPreflightAt: preflights.map(\.observedAt).max(),
+            latestUserTurnAt: latestUserTurnAt)
+        configurationHookHealth = health
+        if health == .staleAfterInstallation, !announcedStaleConfigurationHook {
+            announcedStaleConfigurationHook = true
+            configurationHookNoticeDismissed = false
+            configurationHookHealthTick &+= 1
+        } else if health != .staleAfterInstallation {
+            announcedStaleConfigurationHook = false
+        }
     }
 
     func projectContext(_ turn: TurnRecord) -> String {
@@ -899,6 +992,11 @@ private struct DashboardView: View {
 
                     if let accuracy = model.executionWasteAccuracy {
                         ExecutionWasteCalibrationCard(summary: accuracy)
+                    }
+
+                    if !model.multiAgentFindings.isEmpty ||
+                        model.configurationHookHealth == .staleAfterInstallation {
+                        ExecutionAdvisoryCard(model: model)
                     }
 
                     if let profile = model.routingPreferenceProfile {
@@ -1307,6 +1405,65 @@ private struct ExecutionWasteCalibrationCard: View {
             Color(nsColor: .controlBackgroundColor).opacity(0.72),
             in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.cyan.opacity(0.12)))
+    }
+}
+
+private struct ExecutionAdvisoryCard: View {
+    @ObservedObject var model: DashboardModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(L("Execution strategy audit"), systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.orange)
+            if model.configurationHookHealth == .staleAfterInstallation {
+                Label(L("Configuration Hook has not delivered any events since installation. Fully restart Codex Desktop, then send one prompt to verify it."), systemImage: "bolt.slash.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            ForEach(model.multiAgentFindings.prefix(3)) { finding in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(finding.taskName).font(.caption.weight(.bold)).lineLimit(1)
+                        Spacer()
+                        Text(finding.isActive ? L("Running") : L("Completed review"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(finding.isActive ? .red : .secondary)
+                    }
+                    Text(multiAgentFindingText(finding))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if finding.isActive && finding.severity == .considerInterrupting {
+                        HStack {
+                            Button(L("Interrupt parent task")) { model.interruptParentTask(for: finding) }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.red)
+                            Button(L("Continue observing")) { model.continueObserving(finding) }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                .padding(9)
+                .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(13)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.72), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.22)))
+    }
+}
+
+private func multiAgentFindingText(_ finding: MultiAgentAuditFinding) -> String {
+    switch finding.reason {
+    case .genericWorkerInheritedFullHistory:
+        return L("A generic worker inherited the full conversation. Next time use a bounded agent with fork_turns:none and an exact task envelope.")
+    case .boundedWorkerInheritedFullHistory:
+        return L("A bounded agent inherited the full conversation. Prefer fork_turns:none when the task has a frozen input contract.")
+    case .largeTokenBurn:
+        return LF("This child task has consumed %@ provider tokens (%@ weighted). Check whether it is still producing new evidence.", compactTokenCount(finding.usage.total), compactTokenCount(finding.weightedTokenBurn))
+    case .broadParallelFanout:
+        return L("Several child agents are active under one parent task. Keep only independently useful lanes running.")
     }
 }
 
@@ -2016,6 +2173,13 @@ private struct FloatingPetView: View {
                         .help(L("Collapse floating task cards"))
                     }
                     .frame(width: 556)
+                    if let finding = model.activeExecutionAdvisory {
+                        FloatingExecutionAdvisoryCard(finding: finding, model: model)
+                    }
+                    if model.configurationHookHealth == .staleAfterInstallation &&
+                        !model.configurationHookNoticeDismissed {
+                        FloatingHookHealthCard(model: model)
+                    }
                     if let warning = model.resumeWarning {
                         FloatingResumeWarningCard(session: warning, model: model)
                     } else if displayedSessions.isEmpty {
@@ -2066,7 +2230,20 @@ private struct FloatingPetView: View {
                     .frame(width: 106, height: 116, alignment: .bottomTrailing)
                     .shadow(color: .black.opacity(0.24), radius: 7, y: 5)
                     .overlay(alignment: .topTrailing) {
-                        if routingAttentionSessionID != nil {
+                        if model.activeExecutionAdvisory != nil ||
+                            model.configurationHookHealth == .staleAfterInstallation {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 24, height: 24)
+                                .background(.red, in: Circle())
+                                .overlay(Circle().stroke(.white.opacity(0.72), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.32), radius: 4, y: 2)
+                                .padding(.top, 3)
+                                .padding(.trailing, 2)
+                                .allowsHitTesting(false)
+                                .accessibilityLabel(L("Execution strategy needs attention"))
+                        } else if routingAttentionSessionID != nil {
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.white)
@@ -2219,6 +2396,20 @@ private struct FloatingPetView: View {
         }
         .onChange(of: model.migrationCompletionTick) { _, _ in
             showSpeech(for: .success, bypassMinimumGap: true)
+        }
+        .onChange(of: model.executionAdvisoryTick) { _, _ in
+            invalidatePendingCollapse()
+            pinned = true
+            mode = .stacked
+            onLayoutChange(.stacked, max(1, displayedSessions.count))
+            showSpeech(for: .executionAdvisory, bypassMinimumGap: true)
+        }
+        .onChange(of: model.configurationHookHealthTick) { _, _ in
+            invalidatePendingCollapse()
+            pinned = true
+            mode = .stacked
+            onLayoutChange(.stacked, max(1, displayedSessions.count))
+            showSpeech(for: .configurationHookStale, bypassMinimumGap: true)
         }
         .onChange(of: speechIntensityRawValue) { _, _ in
             if speechIntensity == .off {
@@ -2895,6 +3086,75 @@ private struct FloatingResumeWarningCard: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing),
             in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.red.opacity(0.42)))
+        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+    }
+}
+
+private struct FloatingExecutionAdvisoryCard: View {
+    let finding: MultiAgentAuditFinding
+    @ObservedObject var model: DashboardModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(L("Execution waste is rising"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Spacer()
+                Text(L("Guardian only advises"))
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            Text(finding.taskName).font(.title3.weight(.bold)).lineLimit(1)
+            Text(multiAgentFindingText(finding))
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 14) {
+                Button(L("Interrupt parent task")) { model.interruptParentTask(for: finding) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                Button(L("Continue observing")) { model.continueObserving(finding) }
+                    .buttonStyle(.borderless)
+                Spacer()
+            }
+        }
+        .padding(18)
+        .frame(width: 556, height: 184, alignment: .topLeading)
+        .background(
+            LinearGradient(
+                colors: [.black.opacity(0.97), .orange.opacity(0.18)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.orange.opacity(0.42)))
+        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+    }
+}
+
+private struct FloatingHookHealthCard: View {
+    @ObservedObject var model: DashboardModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(L("Configuration reminder Hook is inactive"), systemImage: "bolt.slash.fill")
+                .font(.headline)
+                .foregroundStyle(.red)
+            Text(L("No configuration event reached Guardian after installation. Fully restart Codex Desktop, then send one prompt; Guardian will verify the chain automatically."))
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(L("Got it")) { model.dismissConfigurationHookHealthNotice() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                Spacer()
+            }
+        }
+        .padding(18)
+        .frame(width: 556, height: 144, alignment: .topLeading)
+        .background(.black.opacity(0.96), in: RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(.red.opacity(0.42)))
         .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
     }

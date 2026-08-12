@@ -1,13 +1,15 @@
 import Foundation
 
 public struct RolloutState: Codable, Equatable, Sendable {
-    public static let currentClassificationVersion = 8
+    public static let currentClassificationVersion = 10
 
     public var sessionID: String?
     public var cwd = ""
     public var classificationVersion: Int?
     public var isSubagent: Bool?
     public var parentThreadID: String?
+    public var agentPath: String?
+    public var didReadPrimarySessionMeta: Bool?
     public var currentModel: String?
     public var currentReasoningEffort: String?
     public var ordinal = 0
@@ -38,11 +40,17 @@ public struct RolloutState: Codable, Equatable, Sendable {
 
         let timestamp = Self.date(object["timestamp"] as? String)
         if type == "session_meta" {
+            guard didReadPrimarySessionMeta != true else { return nil }
+            didReadPrimarySessionMeta = true
             sessionID = payload["id"] as? String ?? sessionID
             cwd = payload["cwd"] as? String ?? cwd
             parentThreadID = payload["parent_thread_id"] as? String
             let source = payload["source"] as? [String: Any]
             isSubagent = source?["subagent"] != nil
+            if let subagent = source?["subagent"] as? [String: Any],
+               let spawn = subagent["thread_spawn"] as? [String: Any] {
+                agentPath = spawn["agent_path"] as? String
+            }
             classificationVersion = Self.currentClassificationVersion
             if active?.cwd.isEmpty == true { active?.cwd = cwd }
             return nil
@@ -82,6 +90,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
         }
         if type == "response_item", eventType == "function_call" || eventType == "custom_tool_call" {
             ensureTurn(timestamp: timestamp, turnID: payload["turn_id"] as? String)
+            recordAgentDispatchIfNeeded(payload, timestamp: timestamp)
             recordTool(named: payload["name"] as? String ?? "", payload: payload)
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
@@ -239,6 +248,29 @@ public struct RolloutState: Codable, Equatable, Sendable {
         active?.model = currentModel
         active?.reasoningEffort = currentReasoningEffort
         active?.quota = latestQuota
+        active?.isSubagent = isSubagent
+        active?.parentThreadID = parentThreadID
+        active?.agentPath = agentPath
+    }
+
+    private mutating func recordAgentDispatchIfNeeded(_ payload: [String: Any], timestamp: Date?) {
+        guard (payload["name"] as? String) == "spawn_agent",
+              let raw = payload["arguments"] as? String,
+              let data = raw.data(using: .utf8),
+              let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let taskName = arguments["task_name"] as? String,
+              !taskName.isEmpty
+        else { return }
+        var records = active?.agentDispatches ?? []
+        let record = AgentDispatchRecord(
+            taskName: taskName,
+            agentType: arguments["agent_type"] as? String ?? "default",
+            forkTurns: arguments["fork_turns"] as? String ?? "all",
+            model: arguments["model"] as? String,
+            reasoningEffort: arguments["reasoning_effort"] as? String,
+            occurredAt: timestamp ?? active?.lastActivityAt ?? Date())
+        if !records.contains(record) { records.append(record) }
+        active?.agentDispatches = records
     }
 
     private mutating func recordTool(named rawName: String, payload: [String: Any]) {

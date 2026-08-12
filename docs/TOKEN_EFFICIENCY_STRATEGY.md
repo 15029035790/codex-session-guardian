@@ -391,6 +391,19 @@ Phase 2 退出门槛：
 - precision 只按 `confirmed_waste / (confirmed_waste + justified)` 计算，`unclear` 单独报告；默认至少收集 30 个结论明确的类别样本，目标 precision 为 80%；
 - 复核队列、标签写入和准确率汇总仅通过本地 CLI 提供，不进入 Dashboard，不触发提醒或自动策略变更。
 
+#### 已落地的多 Agent 执行审计 v1
+
+- 将父任务的 `spawn_agent` 调度记录与 `thread_spawn.agent_path` 子任务日志关联，继承历史中的父会话元数据不得覆盖子任务身份；
+- 识别通用 worker 全量继承、冻结任务全量继承、三个及以上已知子任务并发，以及同时超过 10M provider Token 和 2M 加权 Token 的高消耗子任务；缓存输入按 10% 计入加权消耗，provider Token 原值仍完整展示；
+- 高置信度且仍在运行的命中通过小新浮层提供“打断父任务”与“继续观察”，是否打断始终由用户决定；Guardian 不自动中止、不自动修改 Agent、模型或 effort；
+- 任务结束后只保留复盘建议；菜单栏展示本地证据，CLI 可用 `--multi-agent-audit --multi-agent-audit-days N` 复跑；
+- Guardian 内部安全审查等没有对应 `spawn_agent` 记录的子进程不参与并发扇出判断，避免把宿主内部机制误报为用户调度。
+
+#### 已落地的配置 Hook 链路健康检查 v1
+
+- “没有提醒”不等价于“配置正确”：安装后若已有新用户任务、但始终没有新的 preflight 事件，标记为链路失活；
+- 小新只建议完整重启 Codex Desktop 并发送一条验证提示词，不伪造 Hook 信任状态，也不自行重启正在执行任务的宿主。
+
 ### Phase 3：协作环境优化
 
 只有 Phase 1 和 Phase 2 均通过后开始。

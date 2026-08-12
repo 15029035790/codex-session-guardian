@@ -120,6 +120,15 @@ The production bundle contains a synchronous configuration preflight hook. It bl
 
 After installing or changing the handler, review and trust it from `/hooks` in the Codex CLI. Use `--routing-preflights --limit 20` to inspect the prompt-free local decision ledger; model fallbacks also record their provider Token usage so preflight overhead remains measurable.
 
+Guardian v0.3 also checks whether the installed handler has delivered any event after installation. If Codex Desktop keeps using its pre-install Hook snapshot, Xiaoxin shows a chain-health warning and asks for one full Desktop restart plus a verification prompt; this is distinct from a clean “configuration is appropriate” result.
+
+The local execution-strategy shadow ledger now correlates parent `spawn_agent` calls with child rollouts. It flags full-history inheritance, broad concurrent fan-out, and large provider-token burn. High-confidence findings can surface while work is running with two user-owned choices: interrupt the parent task or continue observing. Guardian never interrupts a task or changes an Agent/model configuration on its own. Completed findings remain in the menu-bar audit card. For local diagnosis:
+
+```bash
+swift run --disable-sandbox codex-session-guardian-cli \
+  --multi-agent-audit --multi-agent-audit-days 7 --limit 10000
+```
+
 The default entry route is `terra/medium`. High-confidence underpowered routes can be upgraded first to `terra/high`, then to `sol/medium`; overpowered routes can still be downgraded. On a mismatch, Xiaoxin opens a floating confirmation card before execution with the current route, suggested route, and reason. “Switch & replay” overrides model and effort for that task and replays only the blocked message. The message crosses a user-only (`0600`) local Unix socket and remains in GUI memory; it is never stored in SQLite and disappears after replay or restart. After a turn finishes, Xiaoxin evaluates quality evidence before comparing provider Token and duration: completion without verification is never treated as quality success. The menu bar only reports route baselines and measured comparisons; it does not infer a configuration for an unknown future task.
 
 Store and inspect privacy-bounded controlled evaluation samples locally:

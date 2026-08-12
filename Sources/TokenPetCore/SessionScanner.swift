@@ -122,9 +122,17 @@ public final class SessionScanner: @unchecked Sendable {
         let archived = metadata.archived.union(try store.archivedSessionIDs())
         let excluded = archived.union(metadata.internalSubagents)
         let active = try store.turns(status: .running, limit: 100)
-            .filter { !excluded.contains($0.sessionID) && isSidebarVisible($0, desktop: metadata.desktop) }
+            .filter {
+                $0.isSubagent != true &&
+                    !excluded.contains($0.sessionID) &&
+                    isSidebarVisible($0, desktop: metadata.desktop)
+            }
         let recent = try store.turns(limit: limit)
-            .filter { !excluded.contains($0.sessionID) && isSidebarVisible($0, desktop: metadata.desktop) }
+            .filter {
+                $0.isSubagent != true &&
+                    !excluded.contains($0.sessionID) &&
+                    isSidebarVisible($0, desktop: metadata.desktop)
+            }
         return DashboardSnapshot(
             active: active,
             recent: recent,
@@ -137,7 +145,9 @@ public final class SessionScanner: @unchecked Sendable {
         let metadata = threadMetadata()
         let visibleSessionIDs = Set(metadata.rolloutPaths.keys).subtracting(metadata.internalSubagents)
         guard !visibleSessionIDs.isEmpty else { return [] }
-        return try store.turns(limit: limit).filter { visibleSessionIDs.contains($0.sessionID) }
+        return try store.turns(limit: limit).filter {
+            $0.isSubagent != true && visibleSessionIDs.contains($0.sessionID)
+        }
     }
 
     public func visibleRolloutPaths(sessionIDs: Set<String>) -> [String: String] {
@@ -263,16 +273,8 @@ public final class SessionScanner: @unchecked Sendable {
             if let cwd = classification.cwd, !cwd.isEmpty { cursor.state.cwd = cwd }
             cursor.state.parentThreadID = classification.parentThreadID
             cursor.state.isSubagent = classification.isSubagent
+            cursor.state.agentPath = classification.agentPath
             cursor.state.classificationVersion = RolloutState.currentClassificationVersion
-        }
-
-        if cursor.state.isSubagent == true {
-            if let sessionID = cursor.state.sessionID { try store.deleteTurns(sessionID: sessionID) }
-            cursor.state.active = nil
-            cursor.offset = size
-            cursor.remainder = Data()
-            try store.save(cursor: cursor)
-            return (0, 0, false)
         }
 
         if cursor.state.latestQuota == nil, let quota = latestQuota(in: url, size: size) {
@@ -333,11 +335,11 @@ public final class SessionScanner: @unchecked Sendable {
     }
 
     private func sessionClassification(in url: URL) -> (
-        sessionID: String?, cwd: String?, parentThreadID: String?, isSubagent: Bool
+        sessionID: String?, cwd: String?, parentThreadID: String?, isSubagent: Bool, agentPath: String?
     ) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return (nil, nil, nil, false) }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return (nil, nil, nil, false, nil) }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: 512 * 1024) else { return (nil, nil, nil, false) }
+        guard let data = try? handle.read(upToCount: 512 * 1024) else { return (nil, nil, nil, false, nil) }
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
             guard line.range(of: Data(#""type":"session_meta""#.utf8)) != nil,
                   let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
@@ -345,13 +347,16 @@ public final class SessionScanner: @unchecked Sendable {
             else { continue }
             let parent = payload["parent_thread_id"] as? String
             let source = payload["source"] as? [String: Any]
+            let subagent = source?["subagent"] as? [String: Any]
+            let spawn = subagent?["thread_spawn"] as? [String: Any]
             return (
                 payload["id"] as? String,
                 payload["cwd"] as? String,
                 parent,
-                source?["subagent"] != nil)
+                source?["subagent"] != nil,
+                spawn?["agent_path"] as? String)
         }
-        return (nil, nil, nil, false)
+        return (nil, nil, nil, false, nil)
     }
 
     private func latestQuota(in url: URL, size: UInt64) -> QuotaSnapshot? {
