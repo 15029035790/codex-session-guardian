@@ -19,18 +19,22 @@ public final class SessionScanner: @unchecked Sendable {
     public let store: SQLiteStore
     public let codexHome: URL
     private let threadDatabasePath: String
+    private let desktopStatePath: String
     private let fileManager: FileManager
 
     public init(
         store: SQLiteStore,
         codexHome: URL,
         threadDatabasePath: String? = nil,
+        desktopStatePath: String? = nil,
         fileManager: FileManager = .default
     ) {
         self.store = store
         self.codexHome = codexHome
         self.threadDatabasePath = threadDatabasePath
             ?? codexHome.appendingPathComponent("state_5.sqlite").path
+        self.desktopStatePath = desktopStatePath
+            ?? codexHome.appendingPathComponent(".codex-global-state.json").path
         self.fileManager = fileManager
     }
 
@@ -56,7 +60,7 @@ public final class SessionScanner: @unchecked Sendable {
             codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
         ]
         let discovered = discoverJSONL(roots: roots).sorted { modificationDate($0) > modificationDate($1) }
-        let priority = threadMetadata().rolloutPaths
+        let priority = Array(threadMetadata().rolloutPaths.values)
             .filter { fileManager.fileExists(atPath: $0.path) }
             .sorted { modificationDate($0) > modificationDate($1) }
         let priorityPaths = Set(priority.map(\.path))
@@ -78,10 +82,37 @@ public final class SessionScanner: @unchecked Sendable {
         return result
     }
 
+    public func indexHistory(
+        since: Date,
+        maximumFiles: Int = 2_000,
+        byteBudget: UInt64 = 512 * 1024 * 1024
+    ) throws -> ScanResult {
+        let roots = [
+            codexHome.appendingPathComponent("sessions", isDirectory: true),
+            codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
+        ]
+        let candidates = discoverJSONL(roots: roots)
+            .filter { modificationDate($0) >= since }
+            .sorted { modificationDate($0) > modificationDate($1) }
+        var result = ScanResult()
+        for url in candidates.prefix(max(0, maximumFiles)) {
+            let size = fileSize(url)
+            if result.scannedFiles > 0, result.bytesRead + size > byteBudget { continue }
+            result.merge(try scan(urls: [url]))
+            if result.bytesRead >= byteBudget { break }
+        }
+        return result
+    }
+
     public func refresh(activePaths: [String], discoverNew: Bool = true) throws -> ScanResult {
         var candidates = activePaths.map(URL.init(fileURLWithPath:))
         if discoverNew {
             candidates.append(contentsOf: discoverJSONL(roots: [todaySessionsDirectory()]))
+            // A Codex task can be resumed days after its rollout file was created.
+            // Keep the sidebar-visible rollout paths discoverable so quota and turn
+            // updates are not lost when an older task previously fell out of the
+            // short-lived active watch set.
+            candidates.append(contentsOf: threadMetadata().rolloutPaths.values)
         }
         return try scan(urls: Array(Set(candidates)))
     }
@@ -89,17 +120,74 @@ public final class SessionScanner: @unchecked Sendable {
     public func snapshot(limit: Int = 500) throws -> DashboardSnapshot {
         let metadata = threadMetadata()
         let archived = metadata.archived.union(try store.archivedSessionIDs())
-        let excluded = archived.union(metadata.subagents)
+        let excluded = archived.union(metadata.internalSubagents)
         let active = try store.turns(status: .running, limit: 100)
-            .filter { !excluded.contains($0.sessionID) }
+            .filter { !excluded.contains($0.sessionID) && isSidebarVisible($0, desktop: metadata.desktop) }
         let recent = try store.turns(limit: limit)
-            .filter { !excluded.contains($0.sessionID) }
+            .filter { !excluded.contains($0.sessionID) && isSidebarVisible($0, desktop: metadata.desktop) }
         return DashboardSnapshot(
             active: active,
             recent: recent,
             sessionTitles: sessionTitles(stateTitles: metadata.titles),
             indexedFiles: try store.indexedFileCount(),
             updatedAt: Date())
+    }
+
+    public func economicsTurns(limit: Int = 10_000) throws -> [TurnRecord] {
+        let metadata = threadMetadata()
+        let visibleSessionIDs = Set(metadata.rolloutPaths.keys).subtracting(metadata.internalSubagents)
+        guard !visibleSessionIDs.isEmpty else { return [] }
+        return try store.turns(limit: limit).filter { visibleSessionIDs.contains($0.sessionID) }
+    }
+
+    public func visibleRolloutPaths(sessionIDs: Set<String>) -> [String: String] {
+        threadMetadata().rolloutPaths.reduce(into: [:]) { result, pair in
+            if sessionIDs.contains(pair.key) { result[pair.key] = pair.value.path }
+        }
+    }
+
+    public func recordShadowCompletions(
+        from previous: DashboardSnapshot,
+        to next: DashboardSnapshot
+    ) throws {
+        let previouslyRunning = Set(previous.active.map(\.id))
+        guard !previouslyRunning.isEmpty else {
+            try store.reconcilePendingHandoffCosts()
+            return
+        }
+        let profile = try store.loadRoutingPreferenceProfile()
+        let newlyTerminal = next.recent.filter {
+            $0.status != .running && previouslyRunning.contains($0.id)
+        }
+        try recordRoutingOutcomes(from: newlyTerminal, routingPreferenceProfile: profile)
+        let sessionsByID = Dictionary(uniqueKeysWithValues: next.sessions.map { ($0.sessionID, $0) })
+        let newlyCompleted = newlyTerminal.filter { $0.status == .completed }
+        for turn in newlyCompleted {
+            guard let session = sessionsByID[turn.sessionID],
+                  let decision = HandoffShadowPolicy.evaluate(session: session, completedTurn: turn)
+            else { continue }
+            try store.recordShadowCompletion(decision: decision, completedTurn: turn)
+        }
+        try store.reconcilePendingHandoffCosts()
+    }
+
+    public func backfillRoutingOutcomes(limit: Int = 10_000) throws {
+        try recordRoutingOutcomes(
+            from: economicsTurns(limit: limit),
+            routingPreferenceProfile: try store.loadRoutingPreferenceProfile())
+    }
+
+    public func recordRoutingOutcomes(
+        from turns: [TurnRecord],
+        routingPreferenceProfile: RoutingPreferenceProfile?
+    ) throws {
+        for turn in turns {
+            if let observation = RoutingOutcomeObservation.derive(
+                from: turn,
+                routingPreferenceProfile: routingPreferenceProfile) {
+                try store.upsertRoutingOutcome(observation)
+            }
+        }
     }
 
     public func scan(urls: [URL]) throws -> ScanResult {
@@ -154,13 +242,15 @@ public final class SessionScanner: @unchecked Sendable {
         }
         cursor.path = url.path
 
-        if cursor.state.classificationVersion != 1 {
+        if cursor.state.classificationVersion != RolloutState.currentClassificationVersion {
+            if let sessionID = cursor.state.sessionID { try store.deleteTurns(sessionID: sessionID) }
+            cursor = FileCursor(identity: identity, path: url.path)
             let classification = sessionClassification(in: url)
             cursor.state.sessionID = classification.sessionID ?? cursor.state.sessionID
             if let cwd = classification.cwd, !cwd.isEmpty { cursor.state.cwd = cwd }
             cursor.state.parentThreadID = classification.parentThreadID
             cursor.state.isSubagent = classification.isSubagent
-            cursor.state.classificationVersion = 1
+            cursor.state.classificationVersion = RolloutState.currentClassificationVersion
         }
 
         if cursor.state.isSubagent == true {
@@ -286,6 +376,69 @@ public final class SessionScanner: @unchecked Sendable {
         return titles.mapValues(Self.displayTitle)
     }
 
+    private struct DesktopSidebarState {
+        var visibleThreadIDs: Set<String>
+        var assignedThreadIDs: Set<String>
+        var projectRoots: [String]
+    }
+
+    private func desktopSidebarState() -> DesktopSidebarState? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: desktopStatePath)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let projects = object["local-projects"] as? [String: Any]
+        else { return nil }
+
+        let validProjectIDs = Set(projects.keys)
+        let roots = projects.values.flatMap { raw -> [String] in
+            guard let project = raw as? [String: Any] else { return [] }
+            return project["rootPaths"] as? [String] ?? []
+        }
+        var visible = Set(object["projectless-thread-ids"] as? [String] ?? [])
+        visible.formUnion(object["pinned-thread-ids"] as? [String] ?? [])
+        var assigned = Set<String>()
+        if let assignments = object["thread-project-assignments"] as? [String: Any] {
+            for (threadID, raw) in assignments {
+                assigned.insert(threadID)
+                guard let assignment = raw as? [String: Any],
+                      assignment["projectKind"] as? String == "local",
+                      let projectID = assignment["projectId"] as? String,
+                      validProjectIDs.contains(projectID)
+                else { continue }
+                visible.insert(threadID)
+            }
+        }
+        return DesktopSidebarState(
+            visibleThreadIDs: visible,
+            assignedThreadIDs: assigned,
+            projectRoots: roots)
+    }
+
+    private func isSidebarVisible(_ turn: TurnRecord, desktop: DesktopSidebarState?) -> Bool {
+        if isDesktopSidebarThread(threadID: turn.sessionID, cwd: turn.cwd, desktop: desktop) { return true }
+        // Desktop can persist a new assignment just after the rollout starts.
+        // Preserve only a genuinely fresh running task during that short lag.
+        guard turn.status == .running, let activity = turn.lastActivityAt else { return false }
+        return Date().timeIntervalSince(activity) < 5 * 60
+    }
+
+    private func isDesktopSidebarThread(
+        threadID: String,
+        cwd: String,
+        desktop: DesktopSidebarState?
+    ) -> Bool {
+        guard let desktop else { return true }
+        if desktop.visibleThreadIDs.contains(threadID) { return true }
+        // An explicit assignment to a project that no longer exists is how
+        // Desktop represents an imported task that has fallen out of the sidebar.
+        if desktop.assignedThreadIDs.contains(threadID) { return false }
+        let standardizedCWD = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        if desktop.projectRoots.contains(where: { root in
+            let standardizedRoot = URL(fileURLWithPath: root).standardizedFileURL.path
+            return standardizedCWD == standardizedRoot || standardizedCWD.hasPrefix(standardizedRoot + "/")
+        }) { return true }
+        return false
+    }
+
     private static func displayTitle(_ rawTitle: String) -> String {
         var source = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         if let start = source.range(of: "<input>"),
@@ -312,33 +465,35 @@ public final class SessionScanner: @unchecked Sendable {
     private func threadMetadata() -> (
         titles: [String: String],
         archived: Set<String>,
-        subagents: Set<String>,
-        rolloutPaths: [URL]
+        internalSubagents: Set<String>,
+        rolloutPaths: [String: URL],
+        desktop: DesktopSidebarState?
     ) {
+        let desktop = desktopSidebarState()
         var database: OpaquePointer?
         guard sqlite3_open_v2(threadDatabasePath, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
               let database
         else {
             if database != nil { sqlite3_close(database) }
-            return ([:], [], [], [])
+            return ([:], [], [], [:], desktop)
         }
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(
             database,
-            "SELECT id, title, archived, source, rollout_path, thread_source FROM threads",
+            "SELECT id, title, archived, source, rollout_path, thread_source, cwd FROM threads",
             -1,
             &statement,
             nil) == SQLITE_OK,
               let statement
-        else { return ([:], [], [], []) }
+        else { return ([:], [], [], [:], desktop) }
         defer { sqlite3_finalize(statement) }
 
         var titles: [String: String] = [:]
         var archived = Set<String>()
-        var subagents = Set<String>()
-        var rolloutPaths: [URL] = []
+        var internalSubagents = Set<String>()
+        var rolloutPaths: [String: URL] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let idPointer = sqlite3_column_text(statement, 0) else { continue }
             let id = String(cString: idPointer)
@@ -350,26 +505,24 @@ public final class SessionScanner: @unchecked Sendable {
             if let sourcePointer = sqlite3_column_text(statement, 3) {
                 let source = String(cString: sourcePointer)
                 if source == "subagent" {
-                    subagents.insert(id)
+                    internalSubagents.insert(id)
                 } else if let data = source.data(using: .utf8),
                           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           object["subagent"] != nil
                 {
-                    subagents.insert(id)
+                    internalSubagents.insert(id)
                 }
             }
-            if let threadSourcePointer = sqlite3_column_text(statement, 5),
-               String(cString: threadSourcePointer) == "subagent"
-            {
-                subagents.insert(id)
-            }
-            if !archived.contains(id), !subagents.contains(id), titles[id] != nil,
+            let cwd = sqlite3_column_text(statement, 6).map { String(cString: $0) } ?? ""
+            if !archived.contains(id), !internalSubagents.contains(id),
+               titles[id] != nil,
+               isDesktopSidebarThread(threadID: id, cwd: cwd, desktop: desktop),
                let pathPointer = sqlite3_column_text(statement, 4)
             {
                 let path = String(cString: pathPointer)
-                if !path.isEmpty { rolloutPaths.append(URL(fileURLWithPath: path)) }
+                if !path.isEmpty { rolloutPaths[id] = URL(fileURLWithPath: path) }
             }
         }
-        return (titles, archived, subagents, rolloutPaths)
+        return (titles, archived, internalSubagents, rolloutPaths, desktop)
     }
 }

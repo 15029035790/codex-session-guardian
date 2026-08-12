@@ -102,6 +102,23 @@ public enum TurnStatus: String, Codable, Sendable {
     case interrupted
 }
 
+public struct TurnExecutionProfile: Codable, Equatable, Sendable {
+    public var readActions = 0
+    public var commandActions = 0
+    public var toolActions = 0
+    public var editActions = 0
+    public var agentActions = 0
+    public var responseEvents = 0
+    public var verificationActions = 0
+    public var failureSignals = 0
+
+    public init() {}
+
+    public var observedActions: Int {
+        readActions + commandActions + toolActions + editActions + agentActions + responseEvents
+    }
+}
+
 public enum TurnRisk: String, Codable, CaseIterable, Comparable, Sendable {
     case green
     case amber
@@ -206,6 +223,9 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
     public var turnID: String?
     public var ordinal: Int
     public var cwd: String
+    public var model: String?
+    public var reasoningEffort: String?
+    public var executionProfile: TurnExecutionProfile?
     public var startedAt: Date?
     public var completedAt: Date?
     public var status: TurnStatus
@@ -224,7 +244,7 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
         contextWindow > 0 ? Double(latestPromptInput) / Double(contextWindow) : nil
     }
     public var risk: TurnRisk {
-        if (contextPressure ?? 0) >= 0.80 || compactions >= 2 { return .red }
+        if (contextPressure ?? 0) >= 0.80 { return .red }
         if (contextPressure ?? 0) >= 0.60 || compactions >= 1 { return .amber }
         return .green
     }
@@ -242,6 +262,9 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
         self.turnID = turnID
         self.ordinal = ordinal
         self.cwd = cwd
+        self.model = nil
+        self.reasoningEffort = nil
+        self.executionProfile = nil
         self.startedAt = startedAt
         self.completedAt = nil
         self.status = status
@@ -267,6 +290,7 @@ public struct SessionSummary: Identifiable, Sendable {
     public var risk: TurnRisk
     public var usage: TokenUsage
     public var compactions: Int
+    public var recentCompactions: Int
     public var advice: SessionAdvice
     public var reason: String
     public var freshInputAnomaly: Bool
@@ -274,6 +298,10 @@ public struct SessionSummary: Identifiable, Sendable {
 
     public var latestTurn: TurnRecord? { turns.first }
     public var isActive: Bool { activity == .executing || activity == .waiting }
+    public var canShowResumeWarning: Bool {
+        guard activity == .waiting, risk == .red else { return false }
+        return postCompactionRebound || recentCompactions > 0
+    }
     public var renderIdentity: String {
         let latest = latestTurn
         return [sessionID, activity.rawValue, latest?.status.rawValue ?? "none", latest?.id ?? "none"]
@@ -329,12 +357,13 @@ public struct DashboardSnapshot: Sendable {
             let usage = turns.reduce(into: TokenUsage()) { $0 = $0 + $1.usage }
             let latest = turns[0]
             let compactions = turns.reduce(0) { $0 + $1.compactions }
+            let recentCompactions = turns.prefix(3).reduce(0) { $0 + $1.compactions }
             let activity = Self.activity(for: latest, now: updatedAt)
             let freshInputAnomaly = Self.isFreshInputAnomaly(turns: turns, policy: policy)
             let postCompactionRebound = Self.isPostCompactionRebound(turns: turns, policy: policy)
             let risk = Self.risk(
                     latest: latest,
-                    compactions: compactions,
+                    recentCompactions: recentCompactions,
                     freshInputAnomaly: freshInputAnomaly,
                     postCompactionRebound: postCompactionRebound,
                     policy: policy)
@@ -349,11 +378,12 @@ public struct DashboardSnapshot: Sendable {
                 risk: risk,
                 usage: usage,
                 compactions: compactions,
+                recentCompactions: recentCompactions,
                 advice: advice,
                 reason: Self.reason(
                         latest: latest,
                         risk: risk,
-                        compactions: compactions,
+                        recentCompactions: recentCompactions,
                         freshInputAnomaly: freshInputAnomaly,
                         postCompactionRebound: postCompactionRebound,
                         policy: policy),
@@ -376,6 +406,7 @@ public struct DashboardSnapshot: Sendable {
     }
 
     public func petAnimationState(
+        liveActivities: [String: SessionLiveActivity] = [:],
         isHovered: Bool = false,
         hasResumeWarning: Bool = false,
         isCelebrating: Bool = false
@@ -383,8 +414,17 @@ public struct DashboardSnapshot: Sendable {
         let active = activeSessions
         if isHovered { return .guardian }
         if hasResumeWarning { return .thinking }
-        if active.contains(where: { $0.activity == .executing }) { return .idle }
+        let activeIDs = Set(active.map(\.sessionID))
+        let live = liveActivities
+            .filter { activeIDs.contains($0.key) }
+            .map(\.value)
+            .sorted { $0.updatedAt > $1.updatedAt }
+        if let attention = live.first(where: { $0.kind.needsUserAttention }) {
+            return attention.kind.petAnimationState
+        }
         if isCelebrating { return .success }
+        if let latest = live.first { return latest.kind.petAnimationState }
+        if active.contains(where: { $0.activity == .executing }) { return .idle }
         if active.contains(where: { $0.activity == .waiting }) { return .working }
         return .multitask
     }
@@ -396,12 +436,21 @@ public struct DashboardSnapshot: Sendable {
         return previouslyActive.intersection(completed)
     }
 
-    public func resumedGuardedSession(from previous: DashboardSnapshot) -> SessionSummary? {
+    public func resumedGuardedSession(
+        from previous: DashboardSnapshot,
+        excluding excludedSessionIDs: Set<String> = [],
+        requiringUserAttention userAttentionSessionIDs: Set<String>
+    ) -> SessionSummary? {
         let guarded = Dictionary(
             uniqueKeysWithValues: previous.startFreshSessions
                 .filter { $0.risk == .red && $0.advice == .startFresh }
                 .map { ($0.sessionID, $0) })
-        guard let resumed = activeSessions.first(where: { guarded[$0.sessionID] != nil }) else { return nil }
+        guard let resumed = activeSessions.first(where: {
+            guarded[$0.sessionID] != nil &&
+                !excludedSessionIDs.contains($0.sessionID) &&
+                userAttentionSessionIDs.contains($0.sessionID) &&
+                $0.canShowResumeWarning
+        }) else { return nil }
         return resumed
     }
 
@@ -462,32 +511,78 @@ public struct DashboardSnapshot: Sendable {
 
     private static func risk(
         latest: TurnRecord,
-        compactions: Int,
+        recentCompactions: Int,
         freshInputAnomaly: Bool,
         postCompactionRebound: Bool,
         policy: HealthPolicy
     ) -> TurnRisk {
-        if (latest.contextPressure ?? 0) >= policy.redContext || compactions >= 2 || postCompactionRebound { return .red }
-        if (latest.contextPressure ?? 0) >= policy.amberContext || compactions == 1 || freshInputAnomaly { return .amber }
+        if (latest.contextPressure ?? 0) >= policy.redContext || postCompactionRebound { return .red }
+        if (latest.contextPressure ?? 0) >= policy.amberContext || recentCompactions > 0 || freshInputAnomaly { return .amber }
         return .green
     }
 
     private static func reason(
         latest: TurnRecord,
         risk: TurnRisk,
-        compactions: Int,
+        recentCompactions: Int,
         freshInputAnomaly: Bool,
         postCompactionRebound: Bool,
         policy: HealthPolicy
     ) -> String {
         let pressure = latest.contextPressure.map { "Context \(Int($0 * 100))%" }
         if postCompactionRebound { return "Context rose quickly after a recent compaction. Start fresh before resuming." }
-        if compactions >= 2 { return "This session has compacted \(compactions) times; continuing may lose early constraints." }
         if (latest.contextPressure ?? 0) >= policy.redContext { return "\(pressure ?? "Context") reached your personalized high-pressure threshold of \(Int(policy.redContext * 100))%." }
-        if compactions == 1 { return "This session compacted once. Watch for a rapid context rebound." }
+        if recentCompactions > 0 { return "This session compacted recently. Watch whether context rebounds quickly." }
         if (latest.contextPressure ?? 0) >= policy.amberContext { return "\(pressure ?? "Context") reached your personalized watch threshold of \(Int(policy.amberContext * 100))%." }
         if freshInputAnomaly { return "Fresh input for this turn is well above this session's personal baseline." }
         if risk == .green { return "Context is below \(Int(policy.amberContext * 100))%, with no compaction or recent input anomaly." }
         return "Watch this session for health changes."
+    }
+}
+
+public struct ResumeWarningSuppressions: Sendable {
+    private var sessionIDs: Set<String> = []
+
+    public init() {}
+
+    public mutating func suppress(_ sessionID: String) {
+        sessionIDs.insert(sessionID)
+    }
+
+    public mutating func reconcile(with sessions: [SessionSummary]) {
+        for session in sessions where session.risk == .green {
+            sessionIDs.remove(session.sessionID)
+        }
+    }
+
+    public func isSuppressed(_ sessionID: String) -> Bool {
+        sessionIDs.contains(sessionID)
+    }
+
+    public var allSessionIDs: Set<String> { sessionIDs }
+}
+
+public struct ResumeWarningBudget: Sendable {
+    public var maximumWarningsPerHour: Int
+    public var perSessionCooldown: TimeInterval
+    private var emittedAt: [Date] = []
+    private var latestBySessionID: [String: Date] = [:]
+
+    public init(maximumWarningsPerHour: Int = 2, perSessionCooldown: TimeInterval = 60 * 60) {
+        self.maximumWarningsPerHour = max(1, maximumWarningsPerHour)
+        self.perSessionCooldown = max(60, perSessionCooldown)
+    }
+
+    public mutating func consumeIfAllowed(sessionID: String, at now: Date) -> Bool {
+        let cutoff = now.addingTimeInterval(-60 * 60)
+        emittedAt.removeAll { $0 < cutoff }
+        latestBySessionID = latestBySessionID.filter { $0.value >= cutoff }
+        guard emittedAt.count < maximumWarningsPerHour else { return false }
+        if let latest = latestBySessionID[sessionID], now.timeIntervalSince(latest) < perSessionCooldown {
+            return false
+        }
+        emittedAt.append(now)
+        latestBySessionID[sessionID] = now
+        return true
     }
 }

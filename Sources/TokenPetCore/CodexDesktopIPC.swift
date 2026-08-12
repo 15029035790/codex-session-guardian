@@ -1,6 +1,45 @@
 import Foundation
 import CSQLite3
 
+public enum CodexDesktopTurnReplay {
+    public static func turnStartParams(
+        prompt: String,
+        model: String,
+        reasoningEffort: String
+    ) -> [String: Any] {
+        [
+            "input": [["type": "text", "text": prompt, "text_elements": []]],
+            "model": model,
+            "effort": reasoningEffort,
+        ]
+    }
+
+    @discardableResult
+    public static func replay(
+        sessionID: String,
+        prompt: String,
+        model: String,
+        reasoningEffort: String,
+        timeout: TimeInterval = 30
+    ) throws -> String {
+        let statePath = SessionScanner.defaultCodexHome()
+            .appendingPathComponent("state_5.sqlite").path
+        guard RoutingReplaySafety.canReplay(sessionID: sessionID, databasePath: statePath) else {
+            throw CodexDesktopIPCError.unavailable(
+                "The target task is running, hidden, delegated, or no longer safe to replay")
+        }
+        let desktop = try CodexDesktopIPCClient(timeout: timeout)
+        defer { desktop.stop() }
+        let owner = try desktop.findThreadOwner(sessionID)
+        return try desktop.startFollowUp(
+            threadID: sessionID,
+            prompt: prompt,
+            ownerID: owner,
+            model: model,
+            reasoningEffort: reasoningEffort)
+    }
+}
+
 enum CodexDesktopIPCError: LocalizedError {
     case unavailable(String)
     case invalidResponse(String)
@@ -14,6 +53,11 @@ enum CodexDesktopIPCError: LocalizedError {
         case let .requestFailed(details): return "Codex Desktop request failed: \(details)"
         case let .timeout(step): return "Timed out while waiting for Codex Desktop to \(step)"
         }
+    }
+
+    var isNoClientFound: Bool {
+        guard case let .requestFailed(details) = self else { return false }
+        return details.localizedCaseInsensitiveContains("no-client-found")
     }
 }
 
@@ -111,14 +155,30 @@ final class CodexDesktopIPCClient: @unchecked Sendable {
         ], targetClientID: ownerID)
     }
 
-    func startFollowUp(threadID: String, prompt: String, ownerID: String) throws -> String {
+    func startFollowUp(
+        threadID: String,
+        prompt: String,
+        ownerID: String,
+        model: String? = nil,
+        reasoningEffort: String? = nil
+    ) throws -> String {
+        var turnStartParams: [String: Any] = [
+            "input": [["type": "text", "text": prompt, "text_elements": []]],
+        ]
+        if let model, let reasoningEffort {
+            turnStartParams = CodexDesktopTurnReplay.turnStartParams(
+                prompt: prompt,
+                model: model,
+                reasoningEffort: reasoningEffort)
+        } else {
+            if let model { turnStartParams["model"] = model }
+            if let reasoningEffort { turnStartParams["effort"] = reasoningEffort }
+        }
         let result = try request("thread-follower-start-turn", params: [
             "conversationId": threadID,
-            "turnStartParams": [
-                "input": [["type": "text", "text": prompt, "text_elements": []]],
-            ],
+            "turnStartParams": turnStartParams,
             "mcpAppModelContextAttachments": [],
-        ], timeout: 120, targetClientID: ownerID)
+        ], timeout: min(timeout, 10), targetClientID: ownerID)
         guard let object = result as? [String: Any],
               let nested = object["result"] as? [String: Any],
               let turn = nested["turn"] as? [String: Any],
@@ -246,6 +306,12 @@ final class CodexRolloutTailer: @unchecked Sendable {
     private var remainder = Data()
 
     init(threadID: String) throws {
+        path = try Self.rolloutPath(threadID: threadID)
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        offset = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
+    static func rolloutPath(threadID: String) throws -> String {
         let codexHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         let databasePath = codexHome.appendingPathComponent("state_5.sqlite").path
         var database: OpaquePointer?
@@ -265,9 +331,7 @@ final class CodexRolloutTailer: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_ROW,
               let pathPointer = sqlite3_column_text(statement, 0)
         else { throw CodexDesktopIPCError.unavailable("Could not find the task log") }
-        path = String(cString: pathPointer)
-        let attributes = try FileManager.default.attributesOfItem(atPath: path)
-        offset = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        return String(cString: pathPointer)
     }
 
     func waitForTurn(_ turnID: String, timeout: TimeInterval) throws -> String {

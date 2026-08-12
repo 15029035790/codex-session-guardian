@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "CodexSessionGuardian",
+    defaultLocalization: "zh-Hans",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "CodexSessionGuardianCore", targets: ["TokenPetCore"]),
@@ -27,6 +28,7 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources/PetAnimations"),
+                .process("Resources/Localization"),
             ]),
         .executableTarget(name: "TokenPetCLI", dependencies: ["TokenPetCore"]),
         .executableTarget(name: "TokenPetTests", dependencies: ["TokenPetCore"]),

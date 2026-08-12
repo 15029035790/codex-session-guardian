@@ -1,17 +1,44 @@
 import CoreGraphics
 import Foundation
 
+public enum FloatingPetShowPlacement: Equatable, Sendable {
+    case initializeFromSavedAnchor
+    case preserveCurrentFrame
+}
+
+public struct FloatingPetVisibilityLifecycle: Sendable {
+    private var hasShown = false
+
+    public init() {}
+
+    public mutating func nextShowPlacement() -> FloatingPetShowPlacement {
+        guard !hasShown else { return .preserveCurrentFrame }
+        hasShown = true
+        return .initializeFromSavedAnchor
+    }
+}
+
+public enum SessionRefreshCadence {
+    public static func interval(
+        statusPanelVisible: Bool,
+        floatingWorkspaceVisible: Bool
+    ) -> TimeInterval {
+        statusPanelVisible || floatingWorkspaceVisible ? 2 : 10
+    }
+}
+
 public enum FloatingPetGeometry {
     /// Keeps an expanded card set stable across partial scanner snapshots.
-    /// Existing sessions refresh when present, while a temporarily missing
-    /// session keeps its last rendered value until the panel is collapsed.
+    /// Current sessions keep the scanner's ordering, newly discovered sessions
+    /// are appended immediately, and a temporarily missing frozen session keeps
+    /// its last rendered value until the panel is collapsed.
     public static func stabilizedSessions(
         frozen: [SessionSummary],
         current: [SessionSummary]
     ) -> [SessionSummary] {
         guard !frozen.isEmpty else { return current }
-        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
-        return frozen.map { currentByID[$0.id] ?? $0 }
+        let currentIDs = Set(current.map(\.id))
+        return current + frozen.filter { !currentIDs.contains($0.id) }
     }
 
     /// Keeps the pet itself visible without coupling its persistent anchor to

@@ -13,10 +13,13 @@ cleanup() {
 trap cleanup EXIT
 
 swift build --disable-sandbox --configuration "$configuration" --package-path "$project_dir"
-mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
+mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Helpers" "$stage_app/Contents/Resources"
 cp "$project_dir/.build/arm64-apple-macosx/$configuration/CodexSessionGuardian" "$stage_app/Contents/MacOS/CodexSessionGuardian"
+cp "$project_dir/.build/arm64-apple-macosx/$configuration/codex-session-guardian-cli" "$stage_app/Contents/Helpers/codex-session-guardian-cli"
 cp "$project_dir/Support/Info.plist" "$stage_app/Contents/Info.plist"
 ditto "$project_dir/Sources/TokenPet/Resources/PetAnimations" "$stage_app/Contents/Resources/PetAnimations"
+resource_bundle="$project_dir/.build/arm64-apple-macosx/$configuration/CodexSessionGuardian_TokenPet.bundle"
+ditto "$resource_bundle" "$stage_app/Contents/Resources/CodexSessionGuardian_TokenPet.bundle"
 "$project_dir/scripts/build-app-icon.sh" "$stage_app/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$stage_app"
 codesign --verify --deep --strict "$stage_app"
