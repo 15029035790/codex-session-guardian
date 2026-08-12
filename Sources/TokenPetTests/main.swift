@@ -557,6 +557,34 @@ func testExecutionWasteShadowLedger() throws {
         precisionTarget: 0.5,
         generatedAt: Date(timeIntervalSince1970: 2_102))
     try expect(targetMetAccuracy.state, .precisionTargetMet, "precision target state requires enough evidence")
+    try expect(
+        ExecutionWasteCalibrationMilestone.derive(from: targetMetAccuracy) == nil,
+        true,
+        "milestone also requires conclusive coverage of every waste reason")
+    var coveredAccuracy = targetMetAccuracy
+    coveredAccuracy.categories = ExecutionWasteReason.allCases.map { reason in
+        ExecutionWasteAccuracyMetrics(
+            reason: reason,
+            detectedSamples: 1,
+            detectedOccurrences: 1,
+            labeledSamples: 1,
+            confirmedWaste: 1,
+            justified: 0,
+            unclear: 0,
+            conclusiveSamples: 1,
+            labelCoverage: 1,
+            precision: 1)
+    }
+    coveredAccuracy.overall.conclusiveSamples = 3
+    coveredAccuracy.overall.confirmedWaste = 3
+    coveredAccuracy.overall.precision = 1
+    coveredAccuracy.minimumConclusiveSamples = 3
+    let readyMilestone = ExecutionWasteCalibrationMilestone.derive(from: coveredAccuracy)
+    try expect(readyMilestone?.outcome, .semanticContinuityReady, "covered precision target emits ready milestone")
+    try expect(readyMilestone?.id, "execution-waste-calibration:\(coveredAccuracy.policyVersion)", "milestone identity is policy-version stable")
+    coveredAccuracy.overall.precision = 0.49
+    let shadowMilestone = ExecutionWasteCalibrationMilestone.derive(from: coveredAccuracy)
+    try expect(shadowMilestone?.outcome, .continueShadow, "covered sample gate below precision continues shadow")
     let labelEncoding = String(decoding: try JSONEncoder().encode(repeatedLabel), as: UTF8.self)
     try expect(labelEncoding.contains("PRIVATE_"), false, "review label stores no raw evidence")
 
@@ -1669,6 +1697,10 @@ func testXiaoxinSpeechScheduling() throws {
         XiaoxinSpeechCatalog.lines(for: .doubleClick, intensity: .active).count,
         4,
         "active mode includes double-click quips")
+    try expect(
+        XiaoxinSpeechCatalog.lines(for: .calibrationReady, intensity: .light).count,
+        1,
+        "calibration milestone has one low-noise speech line")
     try expect(
         activeHover.allSatisfy { $0.localizationKey.hasPrefix("pet.speech.") },
         true,

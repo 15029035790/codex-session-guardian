@@ -27,6 +27,8 @@ public enum XiaoxinSpeechContext: Equatable, Sendable {
     case hover
     case drag
     case doubleClick
+    case calibrationReady
+    case calibrationContinueShadow
 }
 
 public struct XiaoxinSpeechLine: Equatable, Sendable {
@@ -160,6 +162,10 @@ public enum XiaoxinSpeechCatalog {
                 XiaoxinSpeechLine("pet.speech.double_click.only_five", minimumIntensity: .active),
                 XiaoxinSpeechLine("pet.speech.double_click.ticket", minimumIntensity: .active),
             ]
+        case .calibrationReady:
+            [XiaoxinSpeechLine("pet.speech.calibration.ready")]
+        case .calibrationContinueShadow:
+            [XiaoxinSpeechLine("pet.speech.calibration.continue_shadow")]
         }
     }
 }

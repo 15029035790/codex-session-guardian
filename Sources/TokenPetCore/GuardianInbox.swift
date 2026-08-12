@@ -6,6 +6,8 @@ public enum GuardianInboxKind: String, Codable, Equatable, Sendable {
     case completed
     case healthWatch
     case healthCritical
+    case calibrationReady
+    case calibrationContinueShadow
 }
 
 public struct GuardianInboxItem: Identifiable, Equatable, Sendable {
@@ -16,6 +18,7 @@ public struct GuardianInboxItem: Identifiable, Equatable, Sendable {
     public var occurredAt: Date
     public var publicSummary: String?
     public var isRead: Bool
+    public var opensSession: Bool
 
     public init(
         sessionID: String,
@@ -23,7 +26,9 @@ public struct GuardianInboxItem: Identifiable, Equatable, Sendable {
         kind: GuardianInboxKind,
         occurredAt: Date,
         publicSummary: String? = nil,
-        isRead: Bool = false
+        isRead: Bool = false,
+        opensSession: Bool = true,
+        id: String? = nil
     ) {
         self.sessionID = sessionID
         self.sessionTitle = sessionTitle
@@ -31,7 +36,8 @@ public struct GuardianInboxItem: Identifiable, Equatable, Sendable {
         self.occurredAt = occurredAt
         self.publicSummary = publicSummary
         self.isRead = isRead
-        id = "\(sessionID):\(kind.rawValue):\(occurredAt.timeIntervalSince1970)"
+        self.opensSession = opensSession
+        self.id = id ?? "\(sessionID):\(kind.rawValue):\(occurredAt.timeIntervalSince1970)"
     }
 }
 

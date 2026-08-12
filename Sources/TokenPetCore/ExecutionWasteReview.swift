@@ -107,6 +107,30 @@ public struct ExecutionWasteAccuracyMetrics: Codable, Equatable, Sendable {
     public var conclusiveSamples: Int
     public var labelCoverage: Double
     public var precision: Double?
+
+    public init(
+        reason: ExecutionWasteReason?,
+        detectedSamples: Int,
+        detectedOccurrences: Int,
+        labeledSamples: Int,
+        confirmedWaste: Int,
+        justified: Int,
+        unclear: Int,
+        conclusiveSamples: Int,
+        labelCoverage: Double,
+        precision: Double?
+    ) {
+        self.reason = reason
+        self.detectedSamples = detectedSamples
+        self.detectedOccurrences = detectedOccurrences
+        self.labeledSamples = labeledSamples
+        self.confirmedWaste = confirmedWaste
+        self.justified = justified
+        self.unclear = unclear
+        self.conclusiveSamples = conclusiveSamples
+        self.labelCoverage = labelCoverage
+        self.precision = precision
+    }
 }
 
 public enum ExecutionWasteCalibrationState: String, Codable, Equatable, Sendable {

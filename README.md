@@ -133,7 +133,7 @@ Store and inspect privacy-bounded controlled evaluation samples locally:
 
 This records `sol/medium`, `luna/max`, and `terra/high` as unvalidated habits, not correct routes. The audit separately reports official model roles and effort comparisons, and never applies these habits to another user.
 
-Execution-waste attribution v1 is a shadow ledger only: it emits no alerts and takes no automatic action. It conservatively records exact repeated reads, exact retries after explicit failures, and measured tool outputs above fixed byte thresholds. Inspect only anonymous observations with evidence:
+Execution-waste attribution v1 is a shadow ledger: it emits no per-task alerts and takes no automatic action. The menu panel shows aggregate calibration progress. Once the current policy has at least 30 conclusive labels with all three reasons covered, Guardian creates one version-deduplicated Inbox milestone and one non-blocking Xiaoxin line; reading it clears the unread state. It conservatively records exact repeated reads, exact retries after explicit failures, and measured tool outputs above fixed byte thresholds. Inspect only anonymous observations with evidence:
 
 ```bash
 .build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20

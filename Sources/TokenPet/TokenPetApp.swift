@@ -41,6 +41,49 @@ private enum FloatingPetPreference {
     }
 }
 
+private struct ExecutionWasteCalibrationReceipt: Codable {
+    var milestone: ExecutionWasteCalibrationMilestone
+    var isRead: Bool
+}
+
+private final class ExecutionWasteCalibrationReceiptPreference {
+    private let defaults: UserDefaults
+    private let key = "ExecutionWasteCalibrationMilestoneReceipt"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func register(_ milestone: ExecutionWasteCalibrationMilestone) -> (
+        receipt: ExecutionWasteCalibrationReceipt?, isNew: Bool
+    ) {
+        if let current = load(), current.milestone.policyVersion == milestone.policyVersion {
+            return (current, false)
+        }
+        let receipt = ExecutionWasteCalibrationReceipt(milestone: milestone, isRead: false)
+        save(receipt)
+        return (receipt, true)
+    }
+
+    func markRead(milestoneID: String? = nil) {
+        guard var receipt = load(),
+              milestoneID == nil || receipt.milestone.id == milestoneID
+        else { return }
+        receipt.isRead = true
+        save(receipt)
+    }
+
+    private func load() -> ExecutionWasteCalibrationReceipt? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(ExecutionWasteCalibrationReceipt.self, from: data)
+    }
+
+    private func save(_ receipt: ExecutionWasteCalibrationReceipt) {
+        guard let data = try? JSONEncoder().encode(receipt) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+
 private enum XiaoxinSpeechPreference {
     static let storageKey = "CodexSessionGuardianXiaoxinSpeechIntensity"
     static let defaultValue = XiaoxinSpeechIntensity.light.rawValue
@@ -149,15 +192,18 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
         button.sendAction(on: [.leftMouseUp])
         themeSubscription = NotificationCenter.default.publisher(for: .petAnimationThemeDidChange)
             .sink { [weak self] _ in
-                self?.statusItem.button?.image = Self.makeMenuIcon()
+                guard let self else { return }
+                self.statusItem.button?.image = Self.makeMenuIcon(
+                    hasUnread: self.model.inboxState.unreadCount > 0)
             }
-        quotaSubscription = model.$snapshot.sink { [weak self] snapshot in
+        quotaSubscription = model.$snapshot.combineLatest(model.$inboxState).sink { [weak self] snapshot, inbox in
             guard let button = self?.statusItem.button else { return }
             let quota = snapshot.latestQuota.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "—"
-            button.image = Self.makeMenuIcon()
+            button.image = Self.makeMenuIcon(hasUnread: inbox.unreadCount > 0)
             Self.setMenuQuota(
                 quota,
                 level: snapshot.latestQuota?.level,
+                unreadCount: inbox.unreadCount,
                 on: button)
             let statusDescription = LF("%@ · %@ quota remaining", AppVersion.displayName, quota)
             button.toolTip = statusDescription
@@ -210,7 +256,7 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
         model.setPanelVisible(false)
     }
 
-    private static func makeMenuIcon() -> NSImage {
+    private static func makeMenuIcon(hasUnread: Bool = false) -> NSImage {
         let size = NSSize(width: 22, height: 22)
         let result = NSImage(size: size)
         result.lockFocus()
@@ -228,6 +274,10 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
                 from: NSRect(x: 12, y: 10, width: 82, height: 82),
                 operation: .sourceOver,
                 fraction: 1)
+        }
+        if hasUnread {
+            NSColor.systemOrange.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 16, y: 15.5, width: 5.5, height: 5.5)).fill()
         }
         result.unlockFocus()
         result.isTemplate = false
@@ -248,6 +298,9 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var manualRefreshCompletionTick = 0
     @Published private(set) var liveActivities: [String: SessionLiveActivity] = [:]
     @Published private(set) var inboxState = GuardianInboxState()
+    @Published private(set) var executionWasteAccuracy: ExecutionWasteAccuracySummary?
+    @Published private(set) var calibrationSpeechOutcome: ExecutionWasteCalibrationMilestoneOutcome?
+    @Published private(set) var calibrationSpeechTick = 0
     @Published private(set) var routingPreferenceProfile: RoutingPreferenceProfile?
     @Published private(set) var routingEvaluationSamples: [RoutingEvaluationSample] = []
     @Published private(set) var routingOutcomes: [RoutingOutcomeObservation] = []
@@ -269,6 +322,7 @@ final class DashboardModel: ObservableObject {
     private var floatingWorkspaceVisible = false
     private var resumeWarningSuppressions = ResumeWarningSuppressions()
     private var resumeWarningBudget = ResumeWarningBudget()
+    private let calibrationReceipt = ExecutionWasteCalibrationReceiptPreference()
 
     init() {
         Task { @MainActor [weak self] in self?.start() }
@@ -367,16 +421,19 @@ final class DashboardModel: ObservableObject {
             }
             let outcomes = try scanner.store.routingOutcomes(limit: 10_000)
             let preflights = try scanner.store.routingPreflights(limit: 100)
+            let wasteAccuracy = try scanner.store.executionWasteAccuracySummary()
             if initial { _ = malloc_zone_pressure_relief(nil, 0) }
-            return (result, next, outcomes, preflights)
+            return (result, next, outcomes, preflights, wasteAccuracy)
         }
         Task { [weak self] in
             do {
-                let (result, next, outcomes, preflights) = try await work.value
+                let (result, next, outcomes, preflights, wasteAccuracy) = try await work.value
                 guard let self else { return }
                 self.activePaths = result.activePaths
                 self.routingOutcomes = outcomes
                 self.routingPreflights = preflights
+                self.executionWasteAccuracy = wasteAccuracy
+                self.synchronizeCalibrationMilestone(from: wasteAccuracy)
                 if let next {
                     self.recordRoutingPostflights(from: self.snapshot, to: next)
                     self.resumeWarningSuppressions.reconcile(with: next.sessions)
@@ -560,11 +617,39 @@ final class DashboardModel: ObservableObject {
 
     func markAllInboxRead() {
         inboxState.markAllRead()
+        calibrationReceipt.markRead()
     }
 
     func openInboxItem(_ item: GuardianInboxItem) {
         inboxState.markRead(item.id)
+        if !item.opensSession {
+            calibrationReceipt.markRead(milestoneID: item.id)
+            return
+        }
         openSession(item.sessionID)
+    }
+
+    private func synchronizeCalibrationMilestone(from summary: ExecutionWasteAccuracySummary) {
+        guard let milestone = ExecutionWasteCalibrationMilestone.derive(from: summary) else { return }
+        let result = calibrationReceipt.register(milestone)
+        guard let stored = result.receipt, !stored.isRead else { return }
+        let kind: GuardianInboxKind = stored.milestone.outcome == .semanticContinuityReady
+            ? .calibrationReady : .calibrationContinueShadow
+        let title = stored.milestone.outcome == .semanticContinuityReady
+            ? L("Execution waste calibration passed") : L("Execution waste calibration continues")
+        _ = inboxState.record(GuardianInboxItem(
+            sessionID: stored.milestone.policyVersion,
+            sessionTitle: title,
+            kind: kind,
+            occurredAt: stored.milestone.occurredAt,
+            publicSummary: nil,
+            isRead: false,
+            opensSession: false,
+            id: stored.milestone.id))
+        if result.isNew {
+            calibrationSpeechOutcome = stored.milestone.outcome
+            calibrationSpeechTick &+= 1
+        }
     }
 
     private func synchronizeLiveActivityMonitor() {
@@ -935,6 +1020,10 @@ private struct DashboardView: View {
                         quota: model.snapshot.latestQuota,
                         policy: model.snapshot.healthPolicy,
                         speechIntensity: xiaoxinSpeechIntensity(speechIntensityRawValue))
+
+                    if let accuracy = model.executionWasteAccuracy {
+                        ExecutionWasteCalibrationCard(summary: accuracy)
+                    }
 
                     if let profile = model.routingPreferenceProfile {
                         RoutingPreferenceCard(
@@ -1388,7 +1477,7 @@ private struct GuardianInboxCard: View {
                             .background(.orange, in: Capsule())
                     }
                     Spacer()
-                    Text(L("In-memory attention history"))
+                    Text(L("Attention events"))
                         .font(.caption2).foregroundStyle(.secondary)
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption).foregroundStyle(.secondary)
@@ -1449,6 +1538,50 @@ private struct GuardianInboxCard: View {
             Color(nsColor: .controlBackgroundColor).opacity(0.72),
             in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.12)))
+    }
+}
+
+private struct ExecutionWasteCalibrationCard: View {
+    let summary: ExecutionWasteAccuracySummary
+
+    private var milestone: ExecutionWasteCalibrationMilestone? {
+        ExecutionWasteCalibrationMilestone.derive(from: summary)
+    }
+
+    private var statusText: String {
+        guard let milestone else { return L("Shadow calibration in progress") }
+        return milestone.outcome == .semanticContinuityReady
+            ? L("Ready for semantic continuity phase")
+            : L("Calibration not passed; continuing in shadow mode")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label(L("Execution waste calibration"), systemImage: "gauge.with.dots.needle.50percent")
+                    .font(.subheadline.weight(.bold))
+                Spacer()
+                Text("\(summary.overall.conclusiveSamples)/\(summary.minimumConclusiveSamples)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(
+                value: Double(min(summary.overall.conclusiveSamples, summary.minimumConclusiveSamples)),
+                total: Double(summary.minimumConclusiveSamples))
+                .tint(.cyan)
+            HStack {
+                Text(statusText)
+                Spacer()
+                Text(LF("Reasons %lld/%lld", summary.coveredReasonCount, summary.totalReasonCount))
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .padding(13)
+        .background(
+            Color(nsColor: .controlBackgroundColor).opacity(0.72),
+            in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.cyan.opacity(0.12)))
     }
 }
 
@@ -2325,6 +2458,14 @@ private struct FloatingPetView: View {
         .onChange(of: model.migrationCompletionTick) { _, _ in
             showSpeech(for: .success, bypassMinimumGap: true)
         }
+        .onChange(of: model.calibrationSpeechTick) { _, _ in
+            guard let outcome = model.calibrationSpeechOutcome else { return }
+            showSpeech(
+                for: outcome == .semanticContinuityReady
+                    ? .calibrationReady : .calibrationContinueShadow,
+                bypassMinimumGap: true,
+                bypassRepeatCooldown: true)
+        }
         .onChange(of: speechIntensityRawValue) { _, _ in
             if speechIntensity == .off {
                 speechGeneration &+= 1
@@ -3129,6 +3270,8 @@ private func guardianInboxTitle(_ kind: GuardianInboxKind) -> String {
     case .completed: L("Task completed")
     case .healthWatch: L("Session health needs watching")
     case .healthCritical: L("Session should start fresh")
+    case .calibrationReady: L("Calibration target reached")
+    case .calibrationContinueShadow: L("Calibration needs more shadow samples")
     }
 }
 
@@ -3139,6 +3282,8 @@ private func guardianInboxDescription(_ kind: GuardianInboxKind) -> String {
     case .completed: L("The task produced a final public response.")
     case .healthWatch: L("Context pressure or compaction entered the watch range.")
     case .healthCritical: L("Context health reached the start-fresh threshold.")
+    case .calibrationReady: L("Precision and reason coverage are ready for semantic continuity work.")
+    case .calibrationContinueShadow: L("The sample gate is complete, but precision is below the target.")
     }
 }
 
@@ -3149,6 +3294,8 @@ private func guardianInboxIcon(_ kind: GuardianInboxKind) -> String {
     case .completed: "checkmark.circle.fill"
     case .healthWatch: "eye.fill"
     case .healthCritical: "exclamationmark.shield.fill"
+    case .calibrationReady: "checkmark.seal.fill"
+    case .calibrationContinueShadow: "chart.line.text.clipboard"
     }
 }
 
@@ -3157,6 +3304,8 @@ private func guardianInboxColor(_ kind: GuardianInboxKind) -> Color {
     case .waitingForUser, .healthWatch: .orange
     case .failed, .healthCritical: .red
     case .completed: .green
+    case .calibrationReady: .green
+    case .calibrationContinueShadow: .orange
     }
 }
 
