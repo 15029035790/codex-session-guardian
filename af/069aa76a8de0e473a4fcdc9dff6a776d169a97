@@ -1,0 +1,27 @@
+Sources/TokenPet/TokenPetApp.swift
+  s_aa42e25b43f022::t_e53b39a954f95e 469,473,480
+Sources/TokenPetCore/RoutingPreflight.swift
+  s_aa42e25b43f022::t_180e3b20b1c965 500-502,516
+Sources/TokenPetTests/main.swift
+  s_aa42e25b43f022::t_0a9a9a76fffe07 2001-2012
+Support/Info.plist
+  s_aa42e25b43f022::t_5f92120aca1d64 22,24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "af069aa76a8de0e473a4fcdc9dff6a776d169a97",
+  "prompts": {},
+  "sessions": {
+    "s_aa42e25b43f022": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff4f2-9e2c-7b21-a771-d43497dc4b2a",
+        "model": "unknown"
+      },
+      "human_author": "Tangziwen <29474333+15029035790@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
