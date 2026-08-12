@@ -7,6 +7,26 @@ public enum ExecutionWasteReason: String, Codable, CaseIterable, Equatable, Send
     case outputBloat = "output_bloat"
 }
 
+public enum ExecutionWasteEvidenceCode: String, Codable, Equatable, Sendable {
+    case exactReadRepeatedWithoutProgress = "exact_read_repeated_without_progress"
+    case exactRetryAfterExplicitFailure = "exact_retry_after_explicit_failure"
+    case singleOutputThresholdExceeded = "single_output_threshold_exceeded"
+    case cumulativeOutputThresholdExceeded = "cumulative_output_threshold_exceeded"
+}
+
+/// An anonymous review trace. Operation inputs are represented only by their
+/// SHA-256 fingerprint; event positions and measured bytes contain no content.
+public struct ExecutionWasteOccurrence: Codable, Equatable, Sendable {
+    public var reason: ExecutionWasteReason
+    public var evidenceCode: ExecutionWasteEvidenceCode
+    public var operationHash: String?
+    public var generation: Int
+    public var actionOrdinal: Int
+    public var previousActionOrdinal: Int?
+    public var measuredBytes: Int?
+    public var cumulativeBytes: Int?
+}
+
 public struct ExecutionWasteProfile: Codable, Equatable, Sendable {
     public var repeatedReadCount = 0
     public var unchangedRetryCount = 0
@@ -14,6 +34,7 @@ public struct ExecutionWasteProfile: Codable, Equatable, Sendable {
     public var totalToolOutputBytes = 0
     public var largestToolOutputBytes = 0
     public var bloatedOutputBytes = 0
+    public var occurrences: [ExecutionWasteOccurrence]?
 
     public init() {}
 
@@ -35,7 +56,7 @@ public struct ExecutionWasteEvidence: Codable, Equatable, Sendable {
 /// A privacy-safe, terminal-turn shadow observation. It excludes session and
 /// turn identifiers, paths, prompts, commands, tool arguments, and tool output.
 public struct ExecutionWasteObservation: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
     public static let currentPolicyVersion = "execution-waste-v1"
 
     public var schemaVersion: Int
@@ -49,6 +70,7 @@ public struct ExecutionWasteObservation: Codable, Equatable, Sendable {
     public var totalToolOutputBytes: Int
     public var largestToolOutputBytes: Int
     public var evidence: [ExecutionWasteEvidence]
+    public var occurrences: [ExecutionWasteOccurrence]?
     public var policyVersion: String
 
     public static func derive(from turn: TurnRecord) -> Self? {
@@ -96,6 +118,7 @@ public struct ExecutionWasteObservation: Codable, Equatable, Sendable {
             totalToolOutputBytes: max(0, profile.totalToolOutputBytes),
             largestToolOutputBytes: max(0, profile.largestToolOutputBytes),
             evidence: evidence,
+            occurrences: profile.occurrences,
             policyVersion: currentPolicyVersion)
     }
 
@@ -108,6 +131,7 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
     static let singleOutputBloatBytes = 64 * 1_024
     static let repeatedOutputBloatBytes = 96 * 1_024
     private static let maximumTrackedOperations = 128
+    private static let maximumReviewOccurrences = 64
 
     private enum OperationKind: String, Codable, Sendable {
         case read
@@ -117,45 +141,74 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
     private struct PendingOperation: Codable, Equatable, Sendable {
         var fingerprint: String
         var generation: Int
+        var actionOrdinal: Int
+    }
+
+    private struct SeenOperation: Codable, Equatable, Sendable {
+        var generation: Int
+        var actionOrdinal: Int
     }
 
     private struct OutputAccumulator: Codable, Equatable, Sendable {
         var generation: Int
         var bytes: Int
         var flagged: Bool
+        var firstActionOrdinal: Int
     }
 
     var profile = ExecutionWasteProfile()
     private var generation = 0
+    private var actionOrdinal = 0
     private var pending: [String: PendingOperation] = [:]
-    private var seenReadGeneration: [String: Int] = [:]
+    private var seenReads: [String: SeenOperation] = [:]
     private var readOrder: [String] = []
-    private var failedGeneration: [String: Int] = [:]
+    private var failures: [String: SeenOperation] = [:]
     private var failureOrder: [String] = []
     private var outputByOperation: [String: OutputAccumulator] = [:]
     private var outputOrder: [String] = []
 
     mutating func recordToolCall(name rawName: String, payload: [String: Any]) {
+        actionOrdinal += 1
         let normalized = Self.normalizedOperation(name: rawName, payload: payload)
         let fingerprint = Self.digest(normalized.identity)
         if normalized.kind == .read {
-            if seenReadGeneration[fingerprint] == generation {
+            if let previous = seenReads[fingerprint], previous.generation == generation {
                 profile.repeatedReadCount += 1
-            } else {
-                seenReadGeneration[fingerprint] = generation
-                Self.appendBounded(
-                    fingerprint,
-                    to: &readOrder,
-                    dictionary: &seenReadGeneration)
+                appendOccurrence(.init(
+                    reason: .repeatedRead,
+                    evidenceCode: .exactReadRepeatedWithoutProgress,
+                    operationHash: fingerprint,
+                    generation: generation,
+                    actionOrdinal: actionOrdinal,
+                    previousActionOrdinal: previous.actionOrdinal,
+                    measuredBytes: nil,
+                    cumulativeBytes: nil))
             }
+            seenReads[fingerprint] = SeenOperation(
+                generation: generation,
+                actionOrdinal: actionOrdinal)
+            Self.appendBounded(
+                fingerprint,
+                to: &readOrder,
+                dictionary: &seenReads)
         }
-        if failedGeneration[fingerprint] == generation {
+        if let failure = failures[fingerprint], failure.generation == generation {
             profile.unchangedRetryCount += 1
+            appendOccurrence(.init(
+                reason: .retryWithoutChange,
+                evidenceCode: .exactRetryAfterExplicitFailure,
+                operationHash: fingerprint,
+                generation: generation,
+                actionOrdinal: actionOrdinal,
+                previousActionOrdinal: failure.actionOrdinal,
+                measuredBytes: nil,
+                cumulativeBytes: nil))
         }
         guard let callID = payload["call_id"] as? String, !callID.isEmpty else { return }
         pending[callID] = PendingOperation(
             fingerprint: fingerprint,
-            generation: generation)
+            generation: generation,
+            actionOrdinal: actionOrdinal)
         if pending.count > Self.maximumTrackedOperations, let first = pending.keys.sorted().first {
             pending.removeValue(forKey: first)
         }
@@ -170,11 +223,24 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         if bytes >= Self.singleOutputBloatBytes {
             profile.bloatedOutputCount += 1
             profile.bloatedOutputBytes += bytes
+            appendOccurrence(.init(
+                reason: .outputBloat,
+                evidenceCode: .singleOutputThresholdExceeded,
+                operationHash: operation?.fingerprint,
+                generation: generation,
+                actionOrdinal: operation?.actionOrdinal ?? actionOrdinal,
+                previousActionOrdinal: nil,
+                measuredBytes: bytes,
+                cumulativeBytes: bytes))
         }
         if let operation {
             var accumulated = outputByOperation[operation.fingerprint]
             if accumulated?.generation != generation {
-                accumulated = OutputAccumulator(generation: generation, bytes: 0, flagged: false)
+                accumulated = OutputAccumulator(
+                    generation: generation,
+                    bytes: 0,
+                    flagged: false,
+                    firstActionOrdinal: operation.actionOrdinal)
             }
             accumulated!.bytes += bytes
             if bytes < Self.singleOutputBloatBytes,
@@ -184,6 +250,15 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
                 accumulated!.flagged = true
                 profile.bloatedOutputCount += 1
                 profile.bloatedOutputBytes += accumulated!.bytes
+                appendOccurrence(.init(
+                    reason: .outputBloat,
+                    evidenceCode: .cumulativeOutputThresholdExceeded,
+                    operationHash: operation.fingerprint,
+                    generation: generation,
+                    actionOrdinal: operation.actionOrdinal,
+                    previousActionOrdinal: accumulated!.firstActionOrdinal,
+                    measuredBytes: bytes,
+                    cumulativeBytes: accumulated!.bytes))
             } else if bytes >= Self.singleOutputBloatBytes {
                 accumulated!.flagged = true
             }
@@ -193,13 +268,15 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
                 to: &outputOrder,
                 dictionary: &outputByOperation)
             if disposition == .failure {
-                failedGeneration[operation.fingerprint] = operation.generation
+                failures[operation.fingerprint] = SeenOperation(
+                    generation: operation.generation,
+                    actionOrdinal: operation.actionOrdinal)
                 Self.appendBounded(
                     operation.fingerprint,
                     to: &failureOrder,
-                    dictionary: &failedGeneration)
+                    dictionary: &failures)
             } else if disposition == .success {
-                failedGeneration.removeValue(forKey: operation.fingerprint)
+                failures.removeValue(forKey: operation.fingerprint)
                 failureOrder.removeAll { $0 == operation.fingerprint }
             }
         } else if disposition == .failure {
@@ -212,6 +289,15 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
 
     mutating func markProgressBoundary() {
         generation += 1
+    }
+
+    private mutating func appendOccurrence(_ occurrence: ExecutionWasteOccurrence) {
+        var occurrences = profile.occurrences ?? []
+        occurrences.append(occurrence)
+        if occurrences.count > Self.maximumReviewOccurrences {
+            occurrences.removeFirst(occurrences.count - Self.maximumReviewOccurrences)
+        }
+        profile.occurrences = occurrences
     }
 
     private static func normalizedOperation(

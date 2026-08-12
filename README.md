@@ -137,9 +137,12 @@ Execution-waste attribution v1 is a shadow ledger only: it emits no alerts and t
 
 ```bash
 .build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
+.build/debug/codex-session-guardian-cli --execution-waste-review --only-unlabeled --limit 20
+.build/debug/codex-session-guardian-cli --label-execution-waste OBSERVATION_SHA256 --reason repeated_read --verdict confirmed_waste --rationale confirmed_redundant
+.build/debug/codex-session-guardian-cli --execution-waste-accuracy
 ```
 
-The ledger retains at most 2,000 terminal turns and stores only hashes, counts, measured output bytes, provider Token categories, and quality state. It excludes session/turn IDs, paths, prompts, commands, tool arguments, and tool output.
+Labels are per anonymous observation and reason. Use `confirmed_redundant` with `confirmed_waste`; use `intentional_recheck`, `necessary_recovery`, `necessary_evidence`, or `detector_mismatch` with `justified`; and use `insufficient_context` with `unclear`. Free-form notes are intentionally unsupported. The ledger retains at most 2,000 terminal turns and stores only hashes, counts, event positions, measured output bytes, provider Token categories, quality state, and fixed review labels. It excludes session/turn IDs, paths, prompts, commands, tool arguments, and tool output.
 
 Create an optimized, ad-hoc signed app bundle:
 

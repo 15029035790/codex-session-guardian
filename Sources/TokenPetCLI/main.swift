@@ -340,6 +340,67 @@ if arguments.contains("--execution-waste") {
     }
 }
 
+if let observationID = option("--label-execution-waste") {
+    guard let rawReason = option("--reason"),
+          let reason = ExecutionWasteReason(rawValue: rawReason),
+          let rawVerdict = option("--verdict"),
+          let verdict = ExecutionWasteReviewVerdict(rawValue: rawVerdict),
+          let rawRationale = option("--rationale"),
+          let rationale = ExecutionWasteReviewRationale(rawValue: rawRationale)
+    else {
+        fputs("token-pet-cli: --reason, --verdict, and --rationale must use supported values\n", stderr)
+        exit(2)
+    }
+    do {
+        let label = try ExecutionWasteReviewLabel(
+            observationID: observationID,
+            reason: reason,
+            verdict: verdict,
+            rationale: rationale,
+            recordedAt: Date())
+        try SQLiteStore(path: database).upsertExecutionWasteReviewLabel(label)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        print(String(decoding: try encoder.encode(label), as: UTF8.self))
+        exit(0)
+    } catch {
+        fputs("token-pet-cli: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
+if arguments.contains("--execution-waste-review") {
+    do {
+        let items = try SQLiteStore(path: database).executionWasteReviewItems(
+            limit: limit,
+            onlyUnlabeled: arguments.contains("--only-unlabeled"))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        print(String(decoding: try encoder.encode(items), as: UTF8.self))
+        exit(0)
+    } catch {
+        fputs("token-pet-cli: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
+if arguments.contains("--execution-waste-accuracy") {
+    do {
+        let minimumSamples = option("--minimum-conclusive-samples").flatMap(Int.init) ?? 30
+        let precisionTarget = option("--precision-target").flatMap(Double.init) ?? 0.8
+        let summary = try SQLiteStore(path: database).executionWasteAccuracySummary(
+            minimumConclusiveSamples: minimumSamples,
+            precisionTarget: precisionTarget)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        print(String(decoding: try encoder.encode(summary), as: UTF8.self))
+        exit(0)
+    } catch {
+        fputs("token-pet-cli: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 if arguments.contains("--routing-preflights") {
     do {
         let observations = try SQLiteStore(path: database).routingPreflights(limit: limit)

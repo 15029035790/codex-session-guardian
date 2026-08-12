@@ -381,6 +381,14 @@ Phase 2 退出门槛：
 - 持久化内容只包含哈希、计数、输出字节、provider Token 分类、动作数和质量状态，不包含 session/turn ID、标题、cwd、prompt、命令、工具参数或工具输出；
 - v1 只提供 CLI 只读查询，不进入 Dashboard、不提醒、不自动接力、不改变路由。
 
+#### 已落地的执行浪费复核与标注 v1
+
+- 每次命中保存匿名操作哈希、事件序号、进展代、稳定证据码和实测字节，支持复核结构判断，不暴露操作内容；
+- 标签粒度为“匿名 observation × 浪费类别”，同一回合的不同类别可以分别标为 `confirmed_waste`、`justified` 或 `unclear`；
+- 标签原因只允许固定枚举，不保存自由文本；标签必须引用账本中真实存在的命中，不能给阴性样本凭空增加证据；
+- precision 只按 `confirmed_waste / (confirmed_waste + justified)` 计算，`unclear` 单独报告；默认至少收集 30 个结论明确的类别样本，目标 precision 为 80%；
+- 复核队列、标签写入和准确率汇总仅通过本地 CLI 提供，不进入 Dashboard，不触发提醒或自动策略变更。
+
 ### Phase 3：协作环境优化
 
 只有 Phase 1 和 Phase 2 均通过后开始。

@@ -119,6 +119,18 @@ public final class SQLiteStore: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS execution_waste_recent ON execution_waste_observations(observed_at DESC)")
         try execute("""
+            CREATE TABLE IF NOT EXISTS execution_waste_review_labels (
+                observation_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                recorded_at REAL NOT NULL,
+                data BLOB NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(observation_id, reason)
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS execution_waste_labels_recent ON execution_waste_review_labels(recorded_at DESC)")
+        try execute("""
             CREATE TABLE IF NOT EXISTS routing_preflight_observations (
                 id TEXT PRIMARY KEY,
                 observed_at REAL NOT NULL,
@@ -390,12 +402,27 @@ public final class SQLiteStore: @unchecked Sendable {
             bind(try encoder.encode(observation), to: statement, at: 4)
             sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
             try stepDone(statement)
+            let observedReasons = Set(observation.evidence.map(\.reason))
+            for reason in ExecutionWasteReason.allCases where !observedReasons.contains(reason) {
+                let staleLabel = try prepare("""
+                    DELETE FROM execution_waste_review_labels
+                    WHERE observation_id = ? AND reason = ?
+                    """)
+                defer { sqlite3_finalize(staleLabel) }
+                bind(observation.id, to: staleLabel, at: 1)
+                bind(reason.rawValue, to: staleLabel, at: 2)
+                try stepDone(staleLabel)
+            }
             try execute("""
                 DELETE FROM execution_waste_observations
                 WHERE id NOT IN (
                     SELECT id FROM execution_waste_observations
                     ORDER BY observed_at DESC, id ASC LIMIT 2000
                 )
+                """)
+            try execute("""
+                DELETE FROM execution_waste_review_labels
+                WHERE observation_id NOT IN (SELECT id FROM execution_waste_observations)
                 """)
         }
     }
@@ -419,6 +446,93 @@ public final class SQLiteStore: @unchecked Sendable {
             }
             return result
         }
+    }
+
+    public func upsertExecutionWasteReviewLabel(
+        _ label: ExecutionWasteReviewLabel
+    ) throws {
+        try locked {
+            let lookup = try prepare(
+                "SELECT data FROM execution_waste_observations WHERE id = ? LIMIT 1")
+            defer { sqlite3_finalize(lookup) }
+            bind(label.observationID, to: lookup, at: 1)
+            guard sqlite3_step(lookup) == SQLITE_ROW else {
+                throw ExecutionWasteReviewValidationError.observationNotFound
+            }
+            let observation = try decoder.decode(
+                ExecutionWasteObservation.self,
+                from: data(lookup, column: 0))
+            guard observation.evidence.contains(where: { $0.reason == label.reason }) else {
+                throw ExecutionWasteReviewValidationError.reasonNotObserved
+            }
+
+            let statement = try prepare("""
+                INSERT INTO execution_waste_review_labels(
+                    observation_id, reason, verdict, recorded_at, data, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(observation_id, reason) DO UPDATE SET
+                    verdict=excluded.verdict,
+                    recorded_at=excluded.recorded_at,
+                    data=excluded.data,
+                    updated_at=excluded.updated_at
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(label.observationID, to: statement, at: 1)
+            bind(label.reason.rawValue, to: statement, at: 2)
+            bind(label.verdict.rawValue, to: statement, at: 3)
+            sqlite3_bind_double(statement, 4, label.recordedAt.timeIntervalSince1970)
+            bind(try encoder.encode(label), to: statement, at: 5)
+            sqlite3_bind_double(statement, 6, Date().timeIntervalSince1970)
+            try stepDone(statement)
+        }
+    }
+
+    public func executionWasteReviewLabels(limit: Int = 6_000) throws -> [ExecutionWasteReviewLabel] {
+        try locked {
+            let statement = try prepare("""
+                SELECT data FROM execution_waste_review_labels
+                ORDER BY recorded_at DESC, observation_id ASC, reason ASC LIMIT ?
+                """)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            var result: [ExecutionWasteReviewLabel] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(
+                    ExecutionWasteReviewLabel.self,
+                    from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
+    public func executionWasteReviewItems(
+        limit: Int = 100,
+        onlyUnlabeled: Bool = false
+    ) throws -> [ExecutionWasteReviewItem] {
+        let observations = try executionWasteObservations(limit: 2_000, onlyWithEvidence: true)
+        let labels = try executionWasteReviewLabels()
+        let labelsByObservation = Dictionary(grouping: labels, by: \.observationID)
+        return observations.compactMap { observation in
+            let item = ExecutionWasteReviewItem(
+                observation: observation,
+                labels: (labelsByObservation[observation.id] ?? []).sorted {
+                    $0.reason.rawValue < $1.reason.rawValue
+                })
+            return onlyUnlabeled && item.isFullyLabeled ? nil : item
+        }.prefix(max(1, limit)).map { $0 }
+    }
+
+    public func executionWasteAccuracySummary(
+        minimumConclusiveSamples: Int = 30,
+        precisionTarget: Double = 0.8,
+        generatedAt: Date = Date()
+    ) throws -> ExecutionWasteAccuracySummary {
+        try ExecutionWasteAccuracySummary.build(
+            observations: executionWasteObservations(limit: 2_000, onlyWithEvidence: true),
+            labels: executionWasteReviewLabels(),
+            generatedAt: generatedAt,
+            minimumConclusiveSamples: minimumConclusiveSamples,
+            precisionTarget: precisionTarget)
     }
 
     public func recordRoutingPreflight(_ observation: RoutingPreflightObservation) throws {

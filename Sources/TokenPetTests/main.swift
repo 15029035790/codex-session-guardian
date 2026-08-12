@@ -295,6 +295,22 @@ func testExecutionWasteShadowLedger() throws {
     try expect(profile.bloatedOutputCount, 1, "large measured tool output")
     try expect(profile.largestToolOutputBytes, privateLargeOutput.utf8.count, "output bytes measured exactly")
     try expect(profile.reasons, [.repeatedRead, .retryWithoutChange, .outputBloat], "stable waste reason order")
+    try expect(profile.occurrences?.count, 4, "anonymous review trace records each detected occurrence")
+    try expect(
+        profile.occurrences?.map(\.evidenceCode),
+        [
+            .exactReadRepeatedWithoutProgress,
+            .exactReadRepeatedWithoutProgress,
+            .exactRetryAfterExplicitFailure,
+            .singleOutputThresholdExceeded,
+        ],
+        "review trace preserves stable structural evidence")
+    try expect(
+        profile.occurrences?.allSatisfy { occurrence in
+            occurrence.operationHash == nil || occurrence.operationHash?.count == 64
+        },
+        true,
+        "review trace stores only operation hashes")
 
     var structuredState = RolloutState()
     _ = structuredState.process(line: event(type: "turn_context", payload: ["turn_id": "structured-output-turn"]))
@@ -314,10 +330,41 @@ func testExecutionWasteShadowLedger() throws {
         structuredText.utf8.count,
         "structured output counts text bytes without JSON wrapper metadata")
 
+    var cumulativeState = RolloutState()
+    _ = cumulativeState.process(line: event(type: "turn_context", payload: ["turn_id": "cumulative-output-turn"]))
+    let mediumOutput = String(repeating: "x", count: 50 * 1_024)
+    for callID in ["medium-output-1", "medium-output-2"] {
+        _ = cumulativeState.process(line: event(type: "response_item", payload: [
+            "type": "function_call", "name": "remote_tool", "call_id": callID,
+            "arguments": #"{"same":"operation"}"#,
+        ]))
+        _ = cumulativeState.process(line: event(type: "response_item", payload: [
+            "type": "function_call_output", "call_id": callID, "output": mediumOutput,
+        ]))
+    }
+    let cumulativeCompleted = cumulativeState.process(
+        line: event(type: "event_msg", payload: ["type": "task_complete"]))!
+    try expect(
+        cumulativeCompleted.executionWasteProfile?.bloatedOutputCount,
+        1,
+        "repeated medium outputs cross the cumulative threshold")
+    try expect(
+        cumulativeCompleted.executionWasteProfile?.occurrences?.last?.evidenceCode,
+        .cumulativeOutputThresholdExceeded,
+        "cumulative threshold has explicit review evidence")
+
     let observation = ExecutionWasteObservation.derive(from: completed)!
     try expect(observation.qualityEvidence, .verifiedSuccess, "quality remains independent from waste evidence")
     try expect(observation.evidence.map(\.reason), profile.reasons, "ledger preserves reason order")
     try expect(observation.id == completed.id, false, "ledger does not persist raw turn identity")
+    var legacyObject = try JSONSerialization.jsonObject(
+        with: JSONEncoder().encode(observation)) as! [String: Any]
+    legacyObject.removeValue(forKey: "occurrences")
+    legacyObject["schemaVersion"] = 1
+    let legacyObservation = try JSONDecoder().decode(
+        ExecutionWasteObservation.self,
+        from: JSONSerialization.data(withJSONObject: legacyObject))
+    try expect(legacyObservation.occurrences, nil, "schema v1 observations remain decodable")
     let persistedJSON = String(decoding: try JSONEncoder().encode(observation), as: UTF8.self)
     for secret in [
         "private-session", "private-turn", "/private/workspace", "Secret.swift",
@@ -338,6 +385,88 @@ func testExecutionWasteShadowLedger() throws {
         [observation],
         "evidence-only shadow query")
 
+    var invalidRationaleRejected = false
+    do {
+        _ = try ExecutionWasteReviewLabel(
+            observationID: observation.id,
+            reason: .repeatedRead,
+            verdict: .confirmedWaste,
+            rationale: .necessaryEvidence,
+            recordedAt: Date(timeIntervalSince1970: 2_000))
+    } catch ExecutionWasteReviewValidationError.incompatibleRationale {
+        invalidRationaleRejected = true
+    }
+    try expect(invalidRationaleRejected, true, "verdict and rationale compatibility is enforced")
+    var invalidIDRejected = false
+    do {
+        _ = try ExecutionWasteReviewLabel(
+            observationID: String(repeating: "Z", count: 64),
+            reason: .repeatedRead,
+            verdict: .confirmedWaste,
+            rationale: .confirmedRedundant,
+            recordedAt: Date(timeIntervalSince1970: 2_000))
+    } catch ExecutionWasteReviewValidationError.invalidObservationID {
+        invalidIDRejected = true
+    }
+    try expect(invalidIDRejected, true, "review label accepts only lowercase SHA-256 IDs")
+
+    let repeatedLabel = try ExecutionWasteReviewLabel(
+        observationID: observation.id,
+        reason: .repeatedRead,
+        verdict: .confirmedWaste,
+        rationale: .confirmedRedundant,
+        recordedAt: Date(timeIntervalSince1970: 2_001))
+    let retryLabel = try ExecutionWasteReviewLabel(
+        observationID: observation.id,
+        reason: .retryWithoutChange,
+        verdict: .justified,
+        rationale: .necessaryRecovery,
+        recordedAt: Date(timeIntervalSince1970: 2_002))
+    let outputLabel = try ExecutionWasteReviewLabel(
+        observationID: observation.id,
+        reason: .outputBloat,
+        verdict: .unclear,
+        rationale: .insufficientContext,
+        recordedAt: Date(timeIntervalSince1970: 2_003))
+    try store.upsertExecutionWasteReviewLabel(repeatedLabel)
+    try store.upsertExecutionWasteReviewLabel(repeatedLabel)
+    try store.upsertExecutionWasteReviewLabel(retryLabel)
+    try store.upsertExecutionWasteReviewLabel(outputLabel)
+    try expect(try store.executionWasteReviewLabels().count, 3, "review labels upsert per observation and reason")
+    let reviewItems = try store.executionWasteReviewItems(limit: 10)
+    try expect(reviewItems.count, 1, "review query returns evidence samples")
+    try expect(reviewItems[0].isFullyLabeled, true, "each observed category is independently labeled")
+    try expect(
+        try store.executionWasteReviewItems(limit: 10, onlyUnlabeled: true).isEmpty,
+        true,
+        "fully labeled samples leave the review queue")
+    let accuracy = try store.executionWasteAccuracySummary(
+        minimumConclusiveSamples: 2,
+        precisionTarget: 0.8,
+        generatedAt: Date(timeIntervalSince1970: 2_100))
+    try expect(accuracy.state, .precisionBelowTarget, "conclusive labels can expose a low precision result")
+    try expect(accuracy.overall.detectedSamples, 3, "accuracy denominator counts observation-category samples")
+    try expect(accuracy.overall.detectedOccurrences, 4, "accuracy also reports raw occurrence volume")
+    try expect(accuracy.overall.labeledSamples, 3, "all category samples are labeled")
+    try expect(accuracy.overall.conclusiveSamples, 2, "unclear labels stay outside precision denominator")
+    try expect(accuracy.overall.precision, 0.5, "precision uses confirmed over conclusive labels")
+    try expect(
+        accuracy.categories.map(\.reason),
+        [.repeatedRead, .retryWithoutChange, .outputBloat],
+        "accuracy categories preserve stable reason order")
+    let collectingAccuracy = try store.executionWasteAccuracySummary(
+        minimumConclusiveSamples: 3,
+        precisionTarget: 0.5,
+        generatedAt: Date(timeIntervalSince1970: 2_101))
+    try expect(collectingAccuracy.state, .collectingLabels, "sample gate runs before precision target")
+    let targetMetAccuracy = try store.executionWasteAccuracySummary(
+        minimumConclusiveSamples: 2,
+        precisionTarget: 0.5,
+        generatedAt: Date(timeIntervalSince1970: 2_102))
+    try expect(targetMetAccuracy.state, .precisionTargetMet, "precision target state requires enough evidence")
+    let labelEncoding = String(decoding: try JSONEncoder().encode(repeatedLabel), as: UTF8.self)
+    try expect(labelEncoding.contains("PRIVATE_"), false, "review label stores no raw evidence")
+
     var cleanTurn = completed
     cleanTurn.turnID = "clean-turn"
     cleanTurn.ordinal = 2
@@ -349,6 +478,27 @@ func testExecutionWasteShadowLedger() throws {
         try store.executionWasteObservations(limit: 10, onlyWithEvidence: true).count,
         1,
         "evidence filter excludes clean samples")
+    var unobservedReasonRejected = false
+    do {
+        let invalid = try ExecutionWasteReviewLabel(
+            observationID: clean.id,
+            reason: .repeatedRead,
+            verdict: .confirmedWaste,
+            rationale: .confirmedRedundant,
+            recordedAt: Date(timeIntervalSince1970: 2_200))
+        try store.upsertExecutionWasteReviewLabel(invalid)
+    } catch ExecutionWasteReviewValidationError.reasonNotObserved {
+        unobservedReasonRejected = true
+    }
+    try expect(unobservedReasonRejected, true, "labels cannot invent evidence on a clean sample")
+    var revisedObservation = observation
+    revisedObservation.evidence.removeAll { $0.reason == .repeatedRead }
+    revisedObservation.occurrences?.removeAll { $0.reason == .repeatedRead }
+    try store.upsertExecutionWasteObservation(revisedObservation)
+    try expect(
+        try store.executionWasteReviewLabels().map(\.reason).contains(.repeatedRead),
+        false,
+        "labels are removed when a rescanned observation no longer contains that evidence")
 }
 
 func testRoutingOutcomeObservation() throws {

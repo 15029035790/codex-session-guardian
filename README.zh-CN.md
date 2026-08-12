@@ -127,9 +127,12 @@ swift build
 
 ```bash
 .build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
+.build/debug/codex-session-guardian-cli --execution-waste-review --only-unlabeled --limit 20
+.build/debug/codex-session-guardian-cli --label-execution-waste OBSERVATION_SHA256 --reason repeated_read --verdict confirmed_waste --rationale confirmed_redundant
+.build/debug/codex-session-guardian-cli --execution-waste-accuracy
 ```
 
-账本最多保留 2,000 个终态回合，只包含哈希、计数、实测输出字节、provider Token 分类和质量状态，不保存会话/回合 ID、路径、提示词、命令、工具参数或工具输出。
+标签按匿名 observation 和浪费类别分别记录：`confirmed_waste` 使用 `confirmed_redundant`；`justified` 使用 `intentional_recheck`、`necessary_recovery`、`necessary_evidence` 或 `detector_mismatch`；`unclear` 使用 `insufficient_context`。不支持自由文本。账本最多保留 2,000 个终态回合，只包含哈希、计数、事件序号、实测输出字节、provider Token 分类、质量状态和固定标签，不保存会话/回合 ID、路径、提示词、命令、工具参数或工具输出。
 
 生成经过优化和 ad-hoc 签名的应用包：
 
