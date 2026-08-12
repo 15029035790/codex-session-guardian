@@ -362,6 +362,7 @@ final class DashboardModel: ObservableObject {
                 try scanner.recordShadowCompletions(from: previousSnapshot, to: next)
             } else if initial {
                 try scanner.backfillRoutingOutcomes()
+                try scanner.backfillExecutionWasteObservations()
                 try scanner.store.reconcilePendingHandoffCosts()
             }
             let outcomes = try scanner.store.routingOutcomes(limit: 10_000)

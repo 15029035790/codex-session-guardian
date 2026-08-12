@@ -109,6 +109,16 @@ public final class SQLiteStore: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS routing_outcomes_route ON routing_outcomes(model, reasoning_effort, observed_at DESC)")
         try execute("""
+            CREATE TABLE IF NOT EXISTS execution_waste_observations (
+                id TEXT PRIMARY KEY,
+                observed_at REAL NOT NULL,
+                has_evidence INTEGER NOT NULL,
+                data BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS execution_waste_recent ON execution_waste_observations(observed_at DESC)")
+        try execute("""
             CREATE TABLE IF NOT EXISTS routing_preflight_observations (
                 id TEXT PRIMARY KEY,
                 observed_at REAL NOT NULL,
@@ -356,6 +366,55 @@ public final class SQLiteStore: @unchecked Sendable {
             while sqlite3_step(statement) == SQLITE_ROW {
                 result.append(try decoder.decode(
                     RoutingOutcomeObservation.self,
+                    from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
+    public func upsertExecutionWasteObservation(_ observation: ExecutionWasteObservation) throws {
+        try locked {
+            let statement = try prepare("""
+                INSERT INTO execution_waste_observations(id, observed_at, has_evidence, data, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    observed_at=excluded.observed_at,
+                    has_evidence=excluded.has_evidence,
+                    data=excluded.data,
+                    updated_at=excluded.updated_at
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(observation.id, to: statement, at: 1)
+            sqlite3_bind_double(statement, 2, observation.observedAt.timeIntervalSince1970)
+            sqlite3_bind_int(statement, 3, observation.evidence.isEmpty ? 0 : 1)
+            bind(try encoder.encode(observation), to: statement, at: 4)
+            sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
+            try stepDone(statement)
+            try execute("""
+                DELETE FROM execution_waste_observations
+                WHERE id NOT IN (
+                    SELECT id FROM execution_waste_observations
+                    ORDER BY observed_at DESC, id ASC LIMIT 2000
+                )
+                """)
+        }
+    }
+
+    public func executionWasteObservations(
+        limit: Int = 100,
+        onlyWithEvidence: Bool = false
+    ) throws -> [ExecutionWasteObservation] {
+        try locked {
+            let sql = onlyWithEvidence
+                ? "SELECT data FROM execution_waste_observations WHERE has_evidence = 1 ORDER BY observed_at DESC, id ASC LIMIT ?"
+                : "SELECT data FROM execution_waste_observations ORDER BY observed_at DESC, id ASC LIMIT ?"
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            var result: [ExecutionWasteObservation] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(
+                    ExecutionWasteObservation.self,
                     from: data(statement, column: 0)))
             }
             return result

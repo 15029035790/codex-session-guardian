@@ -194,6 +194,163 @@ func testTaskShapeAndRoutingShadow() throws {
     try expect(mismatch.shadowDecisions[0].proposedModel, nil, "profile mismatch does not invent replacement")
 }
 
+func testExecutionWasteShadowLedger() throws {
+    var state = RolloutState()
+    _ = state.process(line: event(type: "session_meta", payload: [
+        "id": "private-session", "cwd": "/private/workspace",
+    ]))
+    _ = state.process(line: event(type: "turn_context", payload: [
+        "turn_id": "private-turn", "model": "gpt-5.6-terra", "effort": "high",
+    ]))
+
+    let privateReadArguments = #"{"path":"/private/workspace/Secret.swift"}"#
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "read_file", "call_id": "read-1",
+        "arguments": privateReadArguments,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "read-1", "output": "PRIVATE_READ_OUTPUT",
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "read_file", "call_id": "read-2",
+        "arguments": privateReadArguments,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "read-2", "output": "PRIVATE_READ_OUTPUT",
+    ]))
+    let privateReadWrapper = #"const r = await tools.exec_command({"cmd":"rg -n PRIVATE_SHELL_PATH Sources"}); text(r.output);"#
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "wrapped-read-1",
+        "input": privateReadWrapper,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "wrapped-read-2",
+        "input": privateReadWrapper,
+    ]))
+    let mixedWrapper = #"const r = await tools.exec_command({"cmd":"rg -n PRIVATE_MIXED Sources && swift build"}); text(r.output);"#
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "mixed-1", "input": mixedWrapper,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "mixed-2", "input": mixedWrapper,
+    ]))
+    _ = state.process(line: event(type: "event_msg", payload: [
+        "type": "patch_apply_end", "changes": ["Secret.swift": ["type": "update"]],
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "read_file", "call_id": "read-after-progress",
+        "arguments": privateReadArguments,
+    ]))
+
+    let privateRetryArguments = #"{"cmd":"swift test PRIVATE_TARGET"}"#
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "exec_command", "call_id": "retry-1",
+        "arguments": privateRetryArguments,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "retry-1",
+        "output": "Process exited with code 1\nPRIVATE_FAILURE",
+    ]))
+    let changedRetry = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "exec_command", "call_id": "retry-changed",
+        "arguments": #"{"cmd":"swift test PRIVATE_TARGET --filter changed"}"#,
+    ]))!
+    try expect(
+        changedRetry.executionWasteProfile?.unchangedRetryCount,
+        0,
+        "changed retry input is not an unchanged retry")
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "exec_command", "call_id": "retry-2",
+        "arguments": privateRetryArguments,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "retry-2",
+        "output": "Process exited with code 0\nPRIVATE_SUCCESS",
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "exec_command", "call_id": "retry-after-progress",
+        "arguments": privateRetryArguments,
+    ]))
+
+    let privateLargeOutput = String(repeating: "PRIVATE_TOOL_OUTPUT_", count: 4_000)
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "remote_tool", "call_id": "large-output",
+        "arguments": #"{"opaque":"PRIVATE_ARGUMENT"}"#,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "large-output", "output": privateLargeOutput,
+    ]))
+    _ = state.process(line: token(total: usage(1_000, 700, 100), last: usage(1_000, 700, 100)))
+
+    let activeEncoding = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
+    try expect(activeEncoding.contains("Secret.swift"), false, "active tracker hashes read target")
+    try expect(activeEncoding.contains("PRIVATE_TARGET"), false, "active tracker hashes retry command")
+    try expect(activeEncoding.contains("PRIVATE_SHELL_PATH"), false, "active tracker hashes wrapped read command")
+    try expect(activeEncoding.contains("PRIVATE_TOOL_OUTPUT"), false, "active tracker excludes tool output")
+
+    let completed = state.process(line: event(type: "event_msg", payload: ["type": "task_complete"]))!
+    let profile = completed.executionWasteProfile!
+    try expect(profile.repeatedReadCount, 2, "direct and conservative wrapped reads repeat before progress")
+    try expect(profile.unchangedRetryCount, 1, "exact failed operation retry before progress")
+    try expect(profile.bloatedOutputCount, 1, "large measured tool output")
+    try expect(profile.largestToolOutputBytes, privateLargeOutput.utf8.count, "output bytes measured exactly")
+    try expect(profile.reasons, [.repeatedRead, .retryWithoutChange, .outputBloat], "stable waste reason order")
+
+    var structuredState = RolloutState()
+    _ = structuredState.process(line: event(type: "turn_context", payload: ["turn_id": "structured-output-turn"]))
+    _ = structuredState.process(line: event(type: "response_item", payload: [
+        "type": "function_call", "name": "remote_tool", "call_id": "structured-output",
+        "arguments": "{}",
+    ]))
+    let structuredText = "actual UTF-8 文本"
+    _ = structuredState.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output", "call_id": "structured-output",
+        "output": [["type": "input_text", "text": structuredText]],
+    ]))
+    let structuredCompleted = structuredState.process(
+        line: event(type: "event_msg", payload: ["type": "task_complete"]))!
+    try expect(
+        structuredCompleted.executionWasteProfile?.totalToolOutputBytes,
+        structuredText.utf8.count,
+        "structured output counts text bytes without JSON wrapper metadata")
+
+    let observation = ExecutionWasteObservation.derive(from: completed)!
+    try expect(observation.qualityEvidence, .verifiedSuccess, "quality remains independent from waste evidence")
+    try expect(observation.evidence.map(\.reason), profile.reasons, "ledger preserves reason order")
+    try expect(observation.id == completed.id, false, "ledger does not persist raw turn identity")
+    let persistedJSON = String(decoding: try JSONEncoder().encode(observation), as: UTF8.self)
+    for secret in [
+        "private-session", "private-turn", "/private/workspace", "Secret.swift",
+        "PRIVATE_TARGET", "PRIVATE_SHELL_PATH", "PRIVATE_MIXED", "PRIVATE_ARGUMENT",
+        "PRIVATE_TOOL_OUTPUT", "PRIVATE_FAILURE",
+    ] {
+        try expect(persistedJSON.contains(secret), false, "ledger excludes private value \(secret)")
+    }
+
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try SQLiteStore(path: root.appendingPathComponent("guardian.sqlite").path)
+    try store.upsertExecutionWasteObservation(observation)
+    try store.upsertExecutionWasteObservation(observation)
+    try expect(try store.executionWasteObservations(limit: 10).count, 1, "waste ledger upsert is idempotent")
+    try expect(
+        try store.executionWasteObservations(limit: 10, onlyWithEvidence: true),
+        [observation],
+        "evidence-only shadow query")
+
+    var cleanTurn = completed
+    cleanTurn.turnID = "clean-turn"
+    cleanTurn.ordinal = 2
+    cleanTurn.executionWasteProfile = ExecutionWasteProfile()
+    let clean = ExecutionWasteObservation.derive(from: cleanTurn)!
+    try store.upsertExecutionWasteObservation(clean)
+    try expect(try store.executionWasteObservations(limit: 10).count, 2, "negative samples retained")
+    try expect(
+        try store.executionWasteObservations(limit: 10, onlyWithEvidence: true).count,
+        1,
+        "evidence filter excludes clean samples")
+}
+
 func testRoutingOutcomeObservation() throws {
     var base = TurnRecord(
         sessionID: "PRIVATE_SESSION",
@@ -2116,6 +2273,7 @@ let tests: [(String, () throws -> Void)] = [
     ("aggregation and cache semantics", testAggregation),
     ("task configuration capture and economics audit", testTaskConfigurationCaptureAndEconomics),
     ("task shape and routing shadow", testTaskShapeAndRoutingShadow),
+    ("execution waste shadow ledger", testExecutionWasteShadowLedger),
     ("routing preference persistence", testRoutingPreferencePersistence),
     ("routing outcome quality and privacy", testRoutingOutcomeObservation),
     ("evaluation task protocol", testEvaluationTaskProtocol),

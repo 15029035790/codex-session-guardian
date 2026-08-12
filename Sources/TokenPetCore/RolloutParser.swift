@@ -1,7 +1,7 @@
 import Foundation
 
 public struct RolloutState: Codable, Equatable, Sendable {
-    public static let currentClassificationVersion = 4
+    public static let currentClassificationVersion = 5
 
     public var sessionID: String?
     public var cwd = ""
@@ -16,6 +16,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
     public var recentFingerprints: [String] = []
     public var latestQuota: QuotaSnapshot?
     public var pendingVerificationCalls: [String: Bool]?
+    var executionWasteTracker: ExecutionWasteTracker?
 
     public init() {}
 
@@ -86,6 +87,9 @@ public struct RolloutState: Codable, Equatable, Sendable {
             return active
         }
         if type == "response_item", eventType == "function_call_output" || eventType == "custom_tool_call_output" {
+            _ = recordWasteOutput(
+                callID: payload["call_id"] as? String,
+                raw: payload["output"])
             if let callID = payload["call_id"] as? String,
                pendingVerificationCalls?[callID] == true
             {
@@ -99,6 +103,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
                         // observed verification result, not transient failures.
                         $0.failureSignals = 0
                     }
+                    executionWasteTracker?.markProgressBoundary()
                 case .failure:
                     mutateProfile { $0.failureSignals += 1 }
                 case .unknown:
@@ -106,6 +111,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
                 }
                 pendingVerificationCalls?.removeValue(forKey: callID)
             }
+            syncWasteProfile()
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
         }
@@ -118,6 +124,8 @@ public struct RolloutState: Codable, Equatable, Sendable {
         if type == "event_msg", eventType == "patch_apply_end" {
             ensureTurn(timestamp: timestamp, turnID: payload["turn_id"] as? String)
             mutateProfile { $0.editActions += max(1, Self.changeCount(payload["changes"])) }
+            executionWasteTracker?.markProgressBoundary()
+            syncWasteProfile()
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
         }
@@ -139,8 +147,10 @@ public struct RolloutState: Codable, Equatable, Sendable {
             active?.completedAt = timestamp
             if let timestamp { active?.lastActivityAt = timestamp }
             active?.status = .interrupted
+            syncWasteProfile()
             let interrupted = active
             active = nil
+            executionWasteTracker = nil
             return interrupted
         }
         if type == "event_msg", eventType == "task_complete" {
@@ -148,14 +158,18 @@ public struct RolloutState: Codable, Equatable, Sendable {
             active?.completedAt = timestamp
             if let timestamp { active?.lastActivityAt = timestamp }
             active?.status = .completed
+            syncWasteProfile()
             let completed = active
             active = nil
+            executionWasteTracker = nil
             return completed
         }
         if (type == "response_item" && eventType == "context_compaction") ||
             (type == "event_msg" && ["context_compacted", "thread_compacted"].contains(eventType))
         {
             active?.compactions += 1
+            executionWasteTracker?.markProgressBoundary()
+            syncWasteProfile()
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
         }
@@ -221,6 +235,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
             ordinal: ordinal,
             cwd: cwd,
             startedAt: timestamp)
+        executionWasteTracker = ExecutionWasteTracker()
         active?.model = currentModel
         active?.reasoningEffort = currentReasoningEffort
         active?.quota = latestQuota
@@ -242,6 +257,9 @@ public struct RolloutState: Codable, Equatable, Sendable {
                 break
             }
         }
+        if executionWasteTracker == nil { executionWasteTracker = ExecutionWasteTracker() }
+        executionWasteTracker?.recordToolCall(name: rawName, payload: payload)
+        syncWasteProfile()
         guard let callID = payload["call_id"] as? String else { return }
         let rawInput = payload["arguments"] as? String ?? payload["input"] as? String ?? ""
         if Self.isVerificationTool(rawName) || Self.isVerificationCommand(rawInput) {
@@ -256,6 +274,17 @@ public struct RolloutState: Codable, Equatable, Sendable {
         var profile = active?.executionProfile ?? TurnExecutionProfile()
         mutation(&profile)
         active?.executionProfile = profile
+    }
+
+    private mutating func recordWasteOutput(callID: String?, raw: Any?) -> ToolOutputDisposition {
+        guard active != nil else { return .unknown }
+        if executionWasteTracker == nil { executionWasteTracker = ExecutionWasteTracker() }
+        return executionWasteTracker?.recordToolOutput(callID: callID, raw: raw) ?? .unknown
+    }
+
+    private mutating func syncWasteProfile() {
+        guard active != nil else { return }
+        active?.executionWasteProfile = executionWasteTracker?.profile
     }
 
     private static func changeCount(_ raw: Any?) -> Int {

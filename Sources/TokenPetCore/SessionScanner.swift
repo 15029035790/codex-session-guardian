@@ -160,6 +160,7 @@ public final class SessionScanner: @unchecked Sendable {
             $0.status != .running && previouslyRunning.contains($0.id)
         }
         try recordRoutingOutcomes(from: newlyTerminal, routingPreferenceProfile: profile)
+        try recordExecutionWasteObservations(from: newlyTerminal)
         let sessionsByID = Dictionary(uniqueKeysWithValues: next.sessions.map { ($0.sessionID, $0) })
         let newlyCompleted = newlyTerminal.filter { $0.status == .completed }
         for turn in newlyCompleted {
@@ -177,6 +178,10 @@ public final class SessionScanner: @unchecked Sendable {
             routingPreferenceProfile: try store.loadRoutingPreferenceProfile())
     }
 
+    public func backfillExecutionWasteObservations(limit: Int = 10_000) throws {
+        try recordExecutionWasteObservations(from: economicsTurns(limit: limit))
+    }
+
     public func recordRoutingOutcomes(
         from turns: [TurnRecord],
         routingPreferenceProfile: RoutingPreferenceProfile?
@@ -186,6 +191,14 @@ public final class SessionScanner: @unchecked Sendable {
                 from: turn,
                 routingPreferenceProfile: routingPreferenceProfile) {
                 try store.upsertRoutingOutcome(observation)
+            }
+        }
+    }
+
+    public func recordExecutionWasteObservations(from turns: [TurnRecord]) throws {
+        for turn in turns {
+            if let observation = ExecutionWasteObservation.derive(from: turn) {
+                try store.upsertExecutionWasteObservation(observation)
             }
         }
     }

@@ -123,6 +123,14 @@ swift build
 
 该配置只把 `sol/medium`、`luna/max`、`terra/high` 记录为待评测的习惯基线，不把它们视为正确答案。报告同时输出官方模型角色和 effort 对照项；其他用户不会被自动套用这份习惯。
 
+执行浪费归因 v1 只运行影子账本，不产生提醒或自动干预。它保守记录完全相同的重复读取、明确失败后的原样重试，以及超过字节阈值的工具输出；可只查看有证据的匿名记录：
+
+```bash
+.build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
+```
+
+账本最多保留 2,000 个终态回合，只包含哈希、计数、实测输出字节、provider Token 分类和质量状态，不保存会话/回合 ID、路径、提示词、命令、工具参数或工具输出。
+
 生成经过优化和 ad-hoc 签名的应用包：
 
 ```bash

@@ -325,6 +325,21 @@ if arguments.contains("--routing-outcomes") {
     }
 }
 
+if arguments.contains("--execution-waste") {
+    do {
+        let observations = try SQLiteStore(path: database).executionWasteObservations(
+            limit: limit,
+            onlyWithEvidence: arguments.contains("--only-with-evidence"))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        print(String(decoding: try encoder.encode(observations), as: UTF8.self))
+        exit(0)
+    } catch {
+        fputs("token-pet-cli: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 if arguments.contains("--routing-preflights") {
     do {
         let observations = try SQLiteStore(path: database).routingPreflights(limit: limit)
@@ -447,6 +462,7 @@ if arguments.contains("--token-audit") {
         let since = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
         let scan = try scanner.indexHistory(since: since)
         try scanner.backfillRoutingOutcomes()
+        try scanner.backfillExecutionWasteObservations()
         let audit = TaskEconomicsAudit.build(
             from: try scanner.economicsTurns(),
             routingPreferenceProfile: try store.loadRoutingPreferenceProfile())
@@ -477,6 +493,7 @@ do {
     let startedAt = Date()
     let scan = try scanner.initialIndex()
     try scanner.backfillRoutingOutcomes()
+    try scanner.backfillExecutionWasteObservations()
     let snapshot = try scanner.snapshot(limit: limit)
     let payload: [String: Any] = [
         "codexHome": home.path,

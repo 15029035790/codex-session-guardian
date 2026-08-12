@@ -133,6 +133,14 @@ Store and inspect privacy-bounded controlled evaluation samples locally:
 
 This records `sol/medium`, `luna/max`, and `terra/high` as unvalidated habits, not correct routes. The audit separately reports official model roles and effort comparisons, and never applies these habits to another user.
 
+Execution-waste attribution v1 is a shadow ledger only: it emits no alerts and takes no automatic action. It conservatively records exact repeated reads, exact retries after explicit failures, and measured tool outputs above fixed byte thresholds. Inspect only anonymous observations with evidence:
+
+```bash
+.build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
+```
+
+The ledger retains at most 2,000 terminal turns and stores only hashes, counts, measured output bytes, provider Token categories, and quality state. It excludes session/turn IDs, paths, prompts, commands, tool arguments, and tool output.
+
 Create an optimized, ad-hoc signed app bundle:
 
 ```bash
