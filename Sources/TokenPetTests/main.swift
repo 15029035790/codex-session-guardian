@@ -224,9 +224,46 @@ func testExecutionWasteShadowLedger() throws {
         "input": privateReadWrapper,
     ]))
     _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call_output", "call_id": "wrapped-read-1",
+        "output": "PRIVATE_WRAPPED_READ_OUTPUT",
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
         "type": "custom_tool_call", "name": "exec", "call_id": "wrapped-read-2",
         "input": privateReadWrapper,
     ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call_output", "call_id": "wrapped-read-2",
+        "output": "PRIVATE_WRAPPED_READ_OUTPUT",
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call", "name": "exec", "call_id": "wrapped-read-changed",
+        "input": privateReadWrapper,
+    ]))
+    _ = state.process(line: event(type: "response_item", payload: [
+        "type": "custom_tool_call_output", "call_id": "wrapped-read-changed",
+        "output": "PRIVATE_CHANGED_READ_OUTPUT",
+    ]))
+    for index in 1...2 {
+        _ = state.process(line: event(type: "response_item", payload: [
+            "type": "custom_tool_call", "name": "list_agents", "call_id": "dynamic-list-\(index)",
+            "input": "{}",
+        ]))
+        _ = state.process(line: event(type: "response_item", payload: [
+            "type": "custom_tool_call_output", "call_id": "dynamic-list-\(index)",
+            "output": "PRIVATE_DYNAMIC_STATE",
+        ]))
+    }
+    let dynamicStatusWrapper = #"const r = await tools.exec_command({"cmd":"python3 wf.py status run | sed -n '1,20p'"}); text(r.output);"#
+    for index in 1...2 {
+        _ = state.process(line: event(type: "response_item", payload: [
+            "type": "custom_tool_call", "name": "exec", "call_id": "dynamic-status-\(index)",
+            "input": dynamicStatusWrapper,
+        ]))
+        _ = state.process(line: event(type: "response_item", payload: [
+            "type": "custom_tool_call_output", "call_id": "dynamic-status-\(index)",
+            "output": "PRIVATE_DYNAMIC_STATUS",
+        ]))
+    }
     let mixedWrapper = #"const r = await tools.exec_command({"cmd":"rg -n PRIVATE_MIXED Sources && swift build"}); text(r.output);"#
     _ = state.process(line: event(type: "response_item", payload: [
         "type": "custom_tool_call", "name": "exec", "call_id": "mixed-1", "input": mixedWrapper,
@@ -300,11 +337,13 @@ func testExecutionWasteShadowLedger() throws {
     ]))
     _ = state.process(line: token(total: usage(1_000, 700, 100), last: usage(1_000, 700, 100)))
 
-    let activeEncoding = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
+    let activeStateData = try JSONEncoder().encode(state)
+    let activeEncoding = String(decoding: activeStateData, as: UTF8.self)
     try expect(activeEncoding.contains("Secret.swift"), false, "active tracker hashes read target")
     try expect(activeEncoding.contains("PRIVATE_TARGET"), false, "active tracker hashes retry command")
     try expect(activeEncoding.contains("PRIVATE_WRAPPED_TARGET"), false, "active tracker hashes wrapped execution context")
     try expect(activeEncoding.contains("PRIVATE_SHELL_PATH"), false, "active tracker hashes wrapped read command")
+    try expect(activeEncoding.contains("PRIVATE_DYNAMIC_STATE"), false, "active tracker excludes dynamic state output")
     try expect(activeEncoding.contains("PRIVATE_TOOL_OUTPUT"), false, "active tracker excludes tool output")
 
     let completed = state.process(line: event(type: "event_msg", payload: ["type": "task_complete"]))!
@@ -384,11 +423,42 @@ func testExecutionWasteShadowLedger() throws {
         ExecutionWasteObservation.self,
         from: JSONSerialization.data(withJSONObject: legacyObject))
     try expect(legacyObservation.occurrences, nil, "schema v1 observations remain decodable")
+    var legacyStateObject = try JSONSerialization.jsonObject(with: activeStateData) as! [String: Any]
+    var removedLegacyPendingKind = false
+    var removedLegacyReadHash = false
+    if var tracker = legacyStateObject["executionWasteTracker"] as? [String: Any],
+       var pending = tracker["pending"] as? [String: Any],
+       let pendingKey = pending.keys.sorted().first,
+       var pendingOperation = pending[pendingKey] as? [String: Any]
+    {
+        pendingOperation.removeValue(forKey: "kind")
+        removedLegacyPendingKind = true
+        pending[pendingKey] = pendingOperation
+        tracker["pending"] = pending
+        legacyStateObject["executionWasteTracker"] = tracker
+    }
+    if var tracker = legacyStateObject["executionWasteTracker"] as? [String: Any],
+       var seenReads = tracker["seenReads"] as? [String: Any],
+       let readKey = seenReads.keys.sorted().first,
+       var readResult = seenReads[readKey] as? [String: Any]
+    {
+        readResult.removeValue(forKey: "outputHash")
+        removedLegacyReadHash = true
+        seenReads[readKey] = readResult
+        tracker["seenReads"] = seenReads
+        legacyStateObject["executionWasteTracker"] = tracker
+    }
+    _ = try JSONDecoder().decode(
+        RolloutState.self,
+        from: JSONSerialization.data(withJSONObject: legacyStateObject))
+    try expect(removedLegacyPendingKind, true, "legacy cursor fixture contains a pending operation")
+    try expect(removedLegacyReadHash, true, "legacy cursor fixture contains a read result")
     let persistedJSON = String(decoding: try JSONEncoder().encode(observation), as: UTF8.self)
     for secret in [
         "private-session", "private-turn", "/private/workspace", "Secret.swift",
         "PRIVATE_TARGET", "PRIVATE_WRAPPED_TARGET", "PRIVATE_SHELL_PATH", "PRIVATE_MIXED", "PRIVATE_ARGUMENT",
-        "PRIVATE_TOOL_OUTPUT", "PRIVATE_FAILURE",
+        "PRIVATE_TOOL_OUTPUT", "PRIVATE_WRAPPED_READ_OUTPUT", "PRIVATE_CHANGED_READ_OUTPUT",
+        "PRIVATE_DYNAMIC_STATE", "PRIVATE_DYNAMIC_STATUS", "PRIVATE_FAILURE",
     ] {
         try expect(persistedJSON.contains(secret), false, "ledger excludes private value \(secret)")
     }

@@ -57,7 +57,7 @@ public struct ExecutionWasteEvidence: Codable, Equatable, Sendable {
 /// turn identifiers, paths, prompts, commands, tool arguments, and tool output.
 public struct ExecutionWasteObservation: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 2
-    public static let currentPolicyVersion = "execution-waste-v1.1"
+    public static let currentPolicyVersion = "execution-waste-v1.2"
 
     public var schemaVersion: Int
     public var id: String
@@ -133,13 +133,14 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
     private static let maximumTrackedOperations = 128
     private static let maximumReviewOccurrences = 64
 
-    private enum OperationKind: String, Codable, Sendable {
+    private enum OperationKind: String, Codable, Equatable, Sendable {
         case read
         case other
     }
 
     private struct PendingOperation: Codable, Equatable, Sendable {
         var fingerprint: String
+        var kind: OperationKind?
         var generation: Int
         var actionOrdinal: Int
     }
@@ -147,6 +148,12 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
     private struct SeenOperation: Codable, Equatable, Sendable {
         var generation: Int
         var actionOrdinal: Int
+    }
+
+    private struct ReadResult: Codable, Equatable, Sendable {
+        var generation: Int
+        var actionOrdinal: Int
+        var outputHash: String?
     }
 
     private struct OutputAccumulator: Codable, Equatable, Sendable {
@@ -160,7 +167,7 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
     private var generation = 0
     private var actionOrdinal = 0
     private var pending: [String: PendingOperation] = [:]
-    private var seenReads: [String: SeenOperation] = [:]
+    private var seenReads: [String: ReadResult] = [:]
     private var readOrder: [String] = []
     private var failures: [String: SeenOperation] = [:]
     private var failureOrder: [String] = []
@@ -171,27 +178,6 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         actionOrdinal += 1
         let normalized = Self.normalizedOperation(name: rawName, payload: payload)
         let fingerprint = Self.digest(normalized.identity)
-        if normalized.kind == .read {
-            if let previous = seenReads[fingerprint], previous.generation == generation {
-                profile.repeatedReadCount += 1
-                appendOccurrence(.init(
-                    reason: .repeatedRead,
-                    evidenceCode: .exactReadRepeatedWithoutProgress,
-                    operationHash: fingerprint,
-                    generation: generation,
-                    actionOrdinal: actionOrdinal,
-                    previousActionOrdinal: previous.actionOrdinal,
-                    measuredBytes: nil,
-                    cumulativeBytes: nil))
-            }
-            seenReads[fingerprint] = SeenOperation(
-                generation: generation,
-                actionOrdinal: actionOrdinal)
-            Self.appendBounded(
-                fingerprint,
-                to: &readOrder,
-                dictionary: &seenReads)
-        }
         if let failure = failures[fingerprint], failure.generation == generation {
             profile.unchangedRetryCount += 1
             appendOccurrence(.init(
@@ -207,6 +193,7 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         guard let callID = payload["call_id"] as? String, !callID.isEmpty else { return }
         pending[callID] = PendingOperation(
             fingerprint: fingerprint,
+            kind: normalized.kind,
             generation: generation,
             actionOrdinal: actionOrdinal)
         if pending.count > Self.maximumTrackedOperations, let first = pending.keys.sorted().first {
@@ -234,6 +221,32 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
                 cumulativeBytes: bytes))
         }
         if let operation {
+            if operation.kind == .read, disposition != .failure {
+                let outputHash = Self.outputFingerprint(raw)
+                if let previous = seenReads[operation.fingerprint],
+                   previous.generation == operation.generation,
+                   previous.outputHash == outputHash
+                {
+                    profile.repeatedReadCount += 1
+                    appendOccurrence(.init(
+                        reason: .repeatedRead,
+                        evidenceCode: .exactReadRepeatedWithoutProgress,
+                        operationHash: operation.fingerprint,
+                        generation: operation.generation,
+                        actionOrdinal: operation.actionOrdinal,
+                        previousActionOrdinal: previous.actionOrdinal,
+                        measuredBytes: bytes,
+                        cumulativeBytes: nil))
+                }
+                seenReads[operation.fingerprint] = ReadResult(
+                    generation: operation.generation,
+                    actionOrdinal: operation.actionOrdinal,
+                    outputHash: outputHash)
+                Self.appendBounded(
+                    operation.fingerprint,
+                    to: &readOrder,
+                    dictionary: &seenReads)
+            }
             var accumulated = outputByOperation[operation.fingerprint]
             if accumulated?.generation != generation {
                 accumulated = OutputAccumulator(
@@ -307,9 +320,8 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         let name = rawName.lowercased()
         let rawInput = operationInput(payload)
         let command = extractExecCommand(from: rawInput)
-        let liveKind = LiveActivityParser.kind(forToolNamed: name)
         let kind: OperationKind
-        if liveKind == .readingFile || command.map(isConservativeReadCommand) == true {
+        if isStaticReadTool(name) || command.map(isConservativeStaticReadCommand) == true {
             kind = .read
         } else {
             kind = .other
@@ -345,18 +357,43 @@ struct ExecutionWasteTracker: Codable, Equatable, Sendable {
         return decoded.first
     }
 
-    private static func isConservativeReadCommand(_ command: String) -> Bool {
-        let value = command.lowercased()
-        let mutatingOrExecuting = [
-            "apply_patch", "git add", "git commit", "git push", "swift build", "swift test",
-            "codex-session-guardian-tests", "npm ", "pnpm ", "yarn ", "cargo ", "go test",
-            "pytest", "xcodebuild", "mkdir ", "cp ", "mv ", "rm ", "ditto ", ">",
-        ]
-        guard !mutatingOrExecuting.contains(where: value.contains) else { return false }
+    private static func isStaticReadTool(_ name: String) -> Bool {
+        let leaf = name.split(separator: "_").suffix(2).joined(separator: "_")
         return [
-            "rg ", "sed -n", "git status", "git diff", "git log", "git show", "find ",
-            "ls ", "head ", "tail ", "wc ", "stat ", "plutil -p", "jq ", "shasum ",
-        ].contains(where: value.contains)
+            "read", "read_file", "read_text", "view_file", "read_resource",
+        ].contains(name) || ["read_file", "read_text", "view_file", "read_resource"].contains(leaf)
+    }
+
+    private static func isConservativeStaticReadCommand(_ command: String) -> Bool {
+        let value = command
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !value.isEmpty,
+              !["\n", "&&", "||", ";", "|", ">", "<"].contains(where: value.contains)
+        else { return false }
+        return [
+            "rg ", "sed -n ", "cat ", "head ", "tail ", "wc ", "shasum ",
+            "plutil -p ", "git show ", "git log ",
+        ].contains(where: value.hasPrefix)
+    }
+
+    private static func outputFingerprint(_ raw: Any?) -> String {
+        if let value = raw as? String { return digest(value) }
+        if let blocks = raw as? [[String: Any]] {
+            let texts = blocks.compactMap { $0["text"] as? String }
+            if !texts.isEmpty { return digest(texts.joined(separator: "\n")) }
+        }
+        if let dictionary = raw as? [String: Any] {
+            if let output = dictionary["output"] { return outputFingerprint(output) }
+            if let text = dictionary["text"] { return outputFingerprint(text) }
+            if let content = dictionary["content"] { return outputFingerprint(content) }
+        }
+        if let raw, JSONSerialization.isValidJSONObject(raw),
+           let data = try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys])
+        {
+            return digest(String(decoding: data, as: UTF8.self))
+        }
+        return digest("")
     }
 
     private static func outputByteCount(_ raw: Any?) -> Int {
