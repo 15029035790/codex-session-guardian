@@ -1,0 +1,29 @@
+Sources/TokenPetCore/ExecutionWaste.swift
+  s_aa42e25b43f022::t_25088a5fa04881 60,317-320
+Sources/TokenPetCore/RolloutParser.swift
+  s_aa42e25b43f022::t_7b360141dba0ce 4
+Sources/TokenPetCore/SQLiteStore.swift
+  s_aa42e25b43f022::t_d0ab70e51ac0a1 516-518
+Sources/TokenPetTests/main.swift
+  s_aa42e25b43f022::t_e05539fc7de0b0 262-279,306,390,406-409,499,502-503
+docs/TOKEN_EFFICIENCY_STRATEGY.md
+  s_aa42e25b43f022::t_508821c962eaba 380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cd9572a338ec1582f5b6afa86f07271cdd583085",
+  "prompts": {},
+  "sessions": {
+    "s_aa42e25b43f022": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff4f2-9e2c-7b21-a771-d43497dc4b2a",
+        "model": "unknown"
+      },
+      "human_author": "Tangziwen <29474333+15029035790@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
