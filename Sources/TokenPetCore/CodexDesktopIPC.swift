@@ -1,6 +1,50 @@
 import Foundation
 import CSQLite3
 
+public struct CodexDesktopReplayReceipt: Equatable, Sendable {
+    public var turnID: String
+    public var requested: RoutingSelection
+    public var actual: RoutingSelection
+
+    public init(turnID: String, requested: RoutingSelection, actual: RoutingSelection) {
+        self.turnID = turnID
+        self.requested = requested
+        self.actual = actual
+    }
+}
+
+public enum CodexDesktopReplayError: LocalizedError, Equatable, Sendable {
+    case configurationMismatch(requested: RoutingSelection, actual: RoutingSelection)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .configurationMismatch(requested, actual):
+            return "Codex started \(actual.model)/\(actual.reasoningEffort) instead of \(requested.model)/\(requested.reasoningEffort)"
+        }
+    }
+
+    public var actualSelection: RoutingSelection {
+        switch self {
+        case let .configurationMismatch(_, actual): return actual
+        }
+    }
+}
+
+public enum CodexDesktopIPCProtocol {
+    public static func version(method: String, params: [String: Any]) -> Int {
+        switch method {
+        case "thread-owner-discovery",
+             "thread-follower-start-turn",
+             "thread-follower-update-thread-settings":
+            return 1
+        case "thread-follower-interrupt-turn":
+            return params["expectedTurnId"] == nil ? 3 : 4
+        default:
+            return 0
+        }
+    }
+}
+
 public enum CodexDesktopTurnReplay {
     public static func turnStartParams(
         prompt: String,
@@ -14,30 +58,89 @@ public enum CodexDesktopTurnReplay {
         ]
     }
 
+    public static func threadSettingsParams(
+        model: String,
+        reasoningEffort: String
+    ) -> [String: Any] {
+        [
+            "model": model,
+            "effort": reasoningEffort,
+        ]
+    }
+
+    public static func turnConfiguration(in data: Data, turnID: String) -> RoutingSelection? {
+        var selection: RoutingSelection?
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  object["type"] as? String == "turn_context",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["turn_id"] as? String == turnID,
+                  let model = payload["model"] as? String,
+                  let effort = payload["effort"] as? String
+            else { continue }
+            selection = RoutingSelection(model: model, reasoningEffort: effort)
+        }
+        return selection
+    }
+
     @discardableResult
     public static func replay(
         sessionID: String,
         prompt: String,
         model: String,
         reasoningEffort: String,
+        previousSelection: RoutingSelection? = nil,
         timeout: TimeInterval = 30
-    ) throws -> String {
+    ) throws -> CodexDesktopReplayReceipt {
         let statePath = SessionScanner.defaultCodexHome()
             .appendingPathComponent("state_5.sqlite").path
         guard RoutingReplaySafety.canReplay(sessionID: sessionID, databasePath: statePath) else {
             throw CodexDesktopIPCError.unavailable(
                 "The target task is running, hidden, delegated, or no longer safe to replay")
         }
+        let requested = RoutingSelection(model: model, reasoningEffort: reasoningEffort)
+        let tailer = try CodexRolloutTailer(threadID: sessionID)
         let desktop = try CodexDesktopIPCClient(timeout: timeout)
         defer { desktop.stop() }
         let owner = try desktop.findThreadOwner(sessionID)
-        return try desktop.startFollowUp(
-            threadID: sessionID,
-            prompt: prompt,
-            ownerID: owner,
-            model: model,
-            reasoningEffort: reasoningEffort)
+        do {
+            try desktop.updateThreadSettings(
+                threadID: sessionID,
+                ownerID: owner,
+                model: model,
+                reasoningEffort: reasoningEffort)
+            let turnID = try desktop.startFollowUp(
+                threadID: sessionID,
+                prompt: prompt,
+                ownerID: owner,
+                model: model,
+                reasoningEffort: reasoningEffort)
+            let actual = try tailer.waitForTurnConfiguration(
+                turnID,
+                timeout: min(timeout, 12))
+            guard actual == requested else {
+                throw CodexDesktopReplayError.configurationMismatch(
+                    requested: requested,
+                    actual: actual)
+            }
+            return CodexDesktopReplayReceipt(turnID: turnID, requested: requested, actual: actual)
+        } catch {
+            if let previousSelection {
+                try? desktop.updateThreadSettings(
+                    threadID: sessionID,
+                    ownerID: owner,
+                    model: previousSelection.model,
+                    reasoningEffort: previousSelection.reasoningEffort)
+            }
+            throw error
+        }
     }
+}
+
+/// Guardian's entire fresh-task control surface. Codex owns the summary and
+/// destination task after this ordinary user message reaches the source task.
+public enum CodexManagedHandoff {
+    public static let instruction = "总结必要上下文，开启新的会话任务"
 }
 
 public enum CodexDesktopTaskControl {
@@ -200,6 +303,20 @@ final class CodexDesktopIPCClient: @unchecked Sendable {
         return turnID
     }
 
+    func updateThreadSettings(
+        threadID: String,
+        ownerID: String,
+        model: String,
+        reasoningEffort: String
+    ) throws {
+        _ = try request("thread-follower-update-thread-settings", params: [
+            "conversationId": threadID,
+            "threadSettings": CodexDesktopTurnReplay.threadSettingsParams(
+                model: model,
+                reasoningEffort: reasoningEffort),
+        ], timeout: min(timeout, 10), targetClientID: ownerID)
+    }
+
     func broadcastThreadArchived(_ threadID: String) throws {
         try send([
             "type": "broadcast",
@@ -240,7 +357,7 @@ final class CodexDesktopIPCClient: @unchecked Sendable {
             "type": "request",
             "requestId": requestID,
             "sourceClientId": clientID,
-            "version": Self.protocolVersion(for: method, params: params),
+            "version": CodexDesktopIPCProtocol.version(method: method, params: params),
             "method": method,
             "params": params,
             "timeoutMs": Int((requestTimeout ?? timeout) * 1_000),
@@ -259,17 +376,6 @@ final class CodexDesktopIPCClient: @unchecked Sendable {
             return message
         }
         throw CodexDesktopIPCError.timeout(method)
-    }
-
-    private static func protocolVersion(for method: String, params: [String: Any]) -> Int {
-        switch method {
-        case "thread-owner-discovery", "thread-follower-start-turn":
-            return 1
-        case "thread-follower-interrupt-turn":
-            return params["expectedTurnId"] == nil ? 3 : 4
-        default:
-            return 0
-        }
     }
 
     private func send(_ object: [String: Any]) throws {
@@ -391,5 +497,33 @@ final class CodexRolloutTailer: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.2)
         }
         throw CodexDesktopIPCError.timeout("finish the handoff")
+    }
+
+    func waitForTurnConfiguration(_ turnID: String, timeout: TimeInterval) throws -> RoutingSelection {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            try handle.seek(toOffset: offset)
+            let data = try handle.readToEnd() ?? Data()
+            try? handle.close()
+            if !data.isEmpty {
+                offset += UInt64(data.count)
+                var buffer = remainder
+                buffer.append(data)
+                if let newline = buffer.lastIndex(of: 0x0A) {
+                    let complete = Data(buffer.prefix(through: newline))
+                    remainder = Data(buffer.suffix(from: buffer.index(after: newline)))
+                    if let selection = CodexDesktopTurnReplay.turnConfiguration(
+                        in: complete,
+                        turnID: turnID) {
+                        return selection
+                    }
+                } else {
+                    remainder = buffer
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw CodexDesktopIPCError.timeout("verify the replay configuration")
     }
 }

@@ -52,7 +52,7 @@ Long Codex tasks can remain technically active while their context becomes expen
 - **Floating active-session cards** — displays the latest state of every active task, keeps the card set stable while hovering or dragging, and can be hidden or restored from the menu bar panel.
 - **Private live activity** — updates each active card from its rollout stream with a real semantic stage, last-update time, and at most two lines of public assistant output; reasoning, tool arguments, and raw tool output are ignored.
 - **Action-first attention** — waits for your approval or answer and task failures immediately expand the floating Xiaoxin card and show a speech bubble; routine activity and completion history do not create an inbox.
-- **Quality-first low-frequency handoff** — asks the source task's model for a structured summary, strictly validates all required sections, then injects it into the fresh task without a confirmation-only model turn; the heuristic local capsule is no longer the default summary.
+- **Codex-managed fresh-task handoff** — when the user explicitly acts on an idle task, Guardian sends only “Summarize the necessary context and start a new task.” Codex itself decides the summary and creates the destination task.
 - **Two animation sets** — switches between Dance Shin-chan and Pixel Shin-chan, with the selected set persisted locally.
 - **State-aware Shin-chan personality** — adds Chinese-first quips for work, multitasking, refreshes, risk, handoff, completion, hover, drag, and double-click interactions, with off, light, and active intensity levels.
 - **Local by design** — stores token facts and file cursors, not prompts, responses, source code, or tool payloads.
@@ -120,16 +120,32 @@ The production bundle contains a synchronous configuration preflight hook. It bl
 
 After installing or changing the handler, review and trust it from `/hooks` in the Codex CLI. Use `--routing-preflights --limit 20` to inspect the prompt-free local decision ledger; model fallbacks also record their provider Token usage so preflight overhead remains measurable.
 
+Guardian can also install observation-only `SubagentStart` and `SubagentStop` handlers. They never block, modify, or start a task. The ledger stores only opaque parent/turn/agent hashes, lifecycle time, agent type, model, permission mode, path-presence flags, and input field names; it never stores cwd, transcript paths, prompts, final messages, or raw IDs:
+
+```bash
+"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --install-subagent-hooks \
+  --hook-command "$PWD/outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --hooks-file "$HOME/.codex/hooks.json"
+
+"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --subagent-hook-diagnostics --limit 100
+```
+
+Restart Codex Desktop once after installation so new tasks use the updated Hook snapshot. The current Hook payload does not expose `fork_turns`; diagnosis correlates this lifecycle ledger with the parent rollout's `spawn_agent` record instead of inventing an inheritance value.
+
+Guardian uses Codex `hooks/list` to distinguish no subagent activity from untrusted handlers and from rollout activity whose lifecycle Hook never arrived. Degraded health appears only on the floating guardian surface; subagent tasks remain absent from the menu-bar session list. Use `--subagent-hook-health` for the privacy-safe health ledger.
+
 Guardian v0.3 also checks whether the installed handler has delivered any event after installation. If Codex Desktop keeps using its pre-install Hook snapshot, Xiaoxin shows a chain-health warning and asks for one full Desktop restart plus a verification prompt; this is distinct from a clean “configuration is appropriate” result.
 
-The local execution-strategy shadow ledger now correlates parent `spawn_agent` calls with child rollouts. It flags full-history inheritance, broad concurrent fan-out, and large provider-token burn. High-confidence findings can surface while work is running with two user-owned choices: interrupt the parent task or continue observing. Guardian never interrupts a task or changes an Agent/model configuration on its own. Completed findings remain in the menu-bar audit card. For local diagnosis:
+The local execution-strategy shadow ledger correlates parent `spawn_agent` calls with child rollouts. It flags full-history inheritance, broad concurrent fan-out, and large provider-token burn. A running finding may produce one dismissible observation card; it never offers interruption or changes an Agent/model configuration. Completed findings remain only in the local diagnostic ledger rather than occupying the menu bar. For local diagnosis:
 
 ```bash
 swift run --disable-sandbox codex-session-guardian-cli \
   --multi-agent-audit --multi-agent-audit-days 7 --limit 10000
 ```
 
-The default entry route is `terra/medium`. High-confidence underpowered routes can be upgraded first to `terra/high`, then to `sol/medium`; overpowered routes can still be downgraded. On a mismatch, Xiaoxin opens a floating confirmation card before execution with the current route, suggested route, and reason. “Switch & replay” overrides model and effort for that task and replays only the blocked message. The message crosses a user-only (`0600`) local Unix socket and remains in GUI memory; it is never stored in SQLite and disappears after replay or restart. After a turn finishes, Xiaoxin evaluates quality evidence before comparing provider Token and duration: completion without verification is never treated as quality success. The menu bar only reports route baselines and measured comparisons; it does not infer a configuration for an unknown future task.
+The default entry route is `sol/medium`. `terra/high` is reserved for a frozen, judgment-dense cross-module implementation with evidence that a lower-capability worker would materially increase repair risk; it is never the general default. On a mismatch, Xiaoxin opens a floating confirmation card before execution with the current route, suggested route, and reason. “Switch configuration & continue” overrides model and effort for that task and replays only the blocked message; “Continue with original configuration” replays it without changing the route. The message crosses a user-only (`0600`) local Unix socket and remains in GUI memory; it is never stored in SQLite and disappears after replay or restart. After a turn finishes, Xiaoxin evaluates quality evidence before comparing provider Token and duration: completion without verification is never treated as quality success. The menu bar only reports route baselines and measured comparisons; it does not infer a configuration for an unknown future task.
 
 Store and inspect privacy-bounded controlled evaluation samples locally:
 
@@ -196,7 +212,7 @@ It writes its local index to the legacy-compatible directory:
 
 The app does not upload session data. Network access is not part of normal monitoring. Live cards read only normalized event types and public assistant output; private reasoning, full tool arguments, raw tool output, stdout, and stderr are never placed into live UI state. Handoff shadow telemetry stores only versioned numeric features, enum reason codes, task/turn identifiers, and exact provider token categories; it excludes titles, working directories, prompts, replies, and handoff bodies, and is bounded to 2,000 decisions and 200 handoffs. The theme import script downloads a pinned public spritesheet only when you run that script manually.
 
-The optional handoff action communicates with the local Codex Desktop owner process or local Codex app-server. It runs only after an explicit user action and never archives or deletes the source task automatically.
+The optional handoff action runs only after an explicit user action on an idle task. Guardian sends one ordinary instruction to the current Codex task and never archives, deletes, summarizes, injects history into, or creates a task itself. Codex owns the resulting summary and destination task.
 
 See [SECURITY.md](SECURITY.md) for reporting and privacy details.
 

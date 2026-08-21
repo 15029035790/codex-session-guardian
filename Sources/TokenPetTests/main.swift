@@ -34,6 +34,32 @@ func testAggregation() throws {
     try expect(QuotaSnapshot(raw: ["primary": ["used_percent": 59.9]]).level, .healthy, "quota healthy boundary")
     try expect(QuotaSnapshot(raw: ["primary": ["used_percent": 60.0]]).level, .caution, "quota caution boundary")
     try expect(QuotaSnapshot(raw: ["primary": ["used_percent": 80.0]]).level, .critical, "quota critical boundary")
+    try expect(QuotaSnapshot.isValid(raw: [:]), false, "missing primary quota is rejected")
+    try expect(
+        QuotaSnapshot.isValid(raw: ["primary": ["window_minutes": 10_080]]),
+        false,
+        "missing used percent is rejected")
+
+    let older = Date(timeIntervalSince1970: 100)
+    let newer = Date(timeIntervalSince1970: 200)
+    var codexTurn = TurnRecord(
+        sessionID: "codex-limit", turnID: "codex-turn", ordinal: 1,
+        cwd: "/project", startedAt: older)
+    codexTurn.quota = QuotaSnapshot(raw: [
+        "limit_id": "codex",
+        "primary": ["used_percent": 14.0],
+    ], observedAt: older)
+    var alternateTurn = TurnRecord(
+        sessionID: "alternate-limit", turnID: "alternate-turn", ordinal: 1,
+        cwd: "/project", startedAt: newer)
+    alternateTurn.quota = QuotaSnapshot(raw: [
+        "limit_id": "codex_bengalfox",
+        "primary": ["used_percent": 0.0],
+    ], observedAt: newer)
+    let quotaSnapshot = DashboardSnapshot(
+        active: [alternateTurn], recent: [codexTurn], indexedFiles: 2, updatedAt: newer)
+    try expect(quotaSnapshot.latestQuota?.remainingPercent, 86, "canonical Codex quota wins over newer alternate bucket")
+    try expect(quotaSnapshot.latestQuota?.limitID, "codex", "canonical quota identity is retained")
 }
 
 func testTaskConfigurationCaptureAndEconomics() throws {
@@ -1091,8 +1117,16 @@ func testMultiAgentExecutionAudit() throws {
         "generic full-history worker and token burn are attributed")
     try expect(
         Set(activeFindings.map(\.severity)),
-        Set([.considerInterrupting]),
-        "active high-confidence waste can suggest interruption")
+        Set([.observeDuringExecution]),
+        "active findings remain observation-only")
+    try expect(
+        Set(activeFindings.map(\.costAttribution)),
+        Set([.observedUsageOnly]),
+        "single-run usage is not mislabeled as avoidable cost")
+    try expect(
+        activeFindings.allSatisfy { $0.estimatedAvoidableProviderTokens == nil },
+        true,
+        "avoidable tokens require a matched baseline")
 
     child.status = .completed
     child.completedAt = now.addingTimeInterval(10)
@@ -1112,13 +1146,56 @@ func testMultiAgentExecutionAudit() throws {
     var parsed = RolloutState()
     _ = parsed.process(line: event(type: "session_meta", payload: ["id": "parser-parent", "cwd": "/project"]))
     _ = parsed.process(line: event(type: "event_msg", payload: ["type": "task_started", "turn_id": "turn"]))
-    let dispatch = parsed.process(line: event(type: "response_item", payload: [
+    let failedAttempt = parsed.process(line: event(type: "response_item", payload: [
         "type": "function_call",
         "name": "spawn_agent",
+        "call_id": "failed-call",
+        "arguments": #"{"task_name":"rejected-all","agent_type":"worker","fork_turns":"all"}"#,
+    ]))
+    _ = parsed.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output",
+        "call_id": "failed-call",
+        "output": "fork_turns: all is unsupported",
+    ]))
+    try expect(failedAttempt?.agentDispatches, nil, "spawn call remains pending before output")
+    try expect(
+        parsed.active?.agentDispatches?.isEmpty ?? true,
+        true,
+        "failed spawn does not create a dispatch record")
+
+    let successCall = parsed.process(line: event(type: "response_item", payload: [
+        "type": "function_call",
+        "name": "spawn_agent",
+        "call_id": "success-call",
         "arguments": #"{"task_name":"bounded","agent_type":"luna_worker","fork_turns":"none"}"#,
     ]))
-    try expect(dispatch?.agentDispatches?.first?.taskName, "bounded", "spawn_agent dispatch is parsed")
-    try expect(dispatch?.agentDispatches?.first?.forkTurns, "none", "fork scope is preserved")
+    try expect(successCall?.agentDispatches, nil, "successful spawn remains pending until started")
+    let started = parsed.process(line: event(type: "event_msg", payload: [
+        "type": "sub_agent_activity",
+        "event_id": "success-call",
+        "agent_thread_id": "child-thread",
+        "agent_path": "/root/bounded",
+        "kind": "started",
+    ]))
+    try expect(started?.agentDispatches?.first?.taskName, "bounded", "started activity confirms dispatch")
+    try expect(started?.agentDispatches?.first?.forkTurns, "none", "fork scope is preserved")
+    try expect(started?.agentDispatches?.first?.callID, "success-call", "call id joins started activity")
+    try expect(started?.agentDispatches?.first?.agentThreadID, "child-thread", "child thread id is retained")
+    try expect(started?.agentDispatches?.first?.agentPath, "/root/bounded", "agent path is retained")
+
+    _ = parsed.process(line: event(type: "response_item", payload: [
+        "type": "function_call",
+        "name": "spawn_agent",
+        "call_id": "output-call",
+        "arguments": #"{"task_name":"output-confirmed","agent_type":"luna_worker"}"#,
+    ]))
+    let outputConfirmed = parsed.process(line: event(type: "response_item", payload: [
+        "type": "function_call_output",
+        "call_id": "output-call",
+        "output": #"{"task_name":"/root/output-confirmed"}"#,
+    ]))
+    try expect(outputConfirmed?.agentDispatches?.last?.taskName, "output-confirmed", "successful output confirms dispatch")
+    try expect(outputConfirmed?.agentDispatches?.last?.forkTurns, nil, "missing fork scope stays unknown")
 
     var childState = RolloutState()
     let parsedChild = childState.process(line: event(type: "session_meta", payload: [
@@ -1149,6 +1226,95 @@ func testMultiAgentExecutionAudit() throws {
     try expect(inheritedTurn?.isSubagent, true, "inherited parent metadata cannot erase child classification")
 }
 
+func testSubagentHookLedger() throws {
+    let now = Date(timeIntervalSince1970: 1_800_100_000)
+    let startPayload: [String: Any] = [
+        "hook_event_name": "SubagentStart",
+        "session_id": "private-parent-session",
+        "turn_id": "private-parent-turn",
+        "agent_id": "private-child-agent",
+        "agent_type": "luna_worker",
+        "model": "gpt-5.6-luna",
+        "permission_mode": "default",
+        "cwd": "/secret/project/path",
+        "transcript_path": "/secret/parent.jsonl",
+    ]
+    let start = SubagentHookObservation.parse(
+        try JSONSerialization.data(withJSONObject: startPayload),
+        now: now)
+    try expect(start.event, .start, "subagent start event is parsed")
+    try expect(start.outcome, .parsed, "complete lifecycle input is accepted")
+    try expect(start.agentType, "luna_worker", "safe agent type is retained")
+    try expect(start.forkTurns, nil, "Hook payload does not invent missing fork scope")
+    try expect(start.hasTranscriptPath, true, "path presence is retained without its value")
+
+    let encodedStart = String(decoding: try JSONEncoder().encode(start), as: UTF8.self)
+    for secret in ["private-parent-session", "private-parent-turn", "private-child-agent", "/secret/project/path", "/secret/parent.jsonl"] {
+        try expect(encodedStart.contains(secret), false, "subagent ledger omits raw private value")
+    }
+
+    let stopPayload: [String: Any] = [
+        "hook_event_name": "SubagentStop",
+        "session_id": "private-parent-session",
+        "turn_id": "private-parent-turn",
+        "agent_id": "private-child-agent",
+        "agent_type": "luna_worker",
+        "model": "gpt-5.6-luna",
+        "permission_mode": "default",
+        "cwd": "/secret/project/path",
+        "transcript_path": "/secret/parent.jsonl",
+        "agent_transcript_path": "/secret/child.jsonl",
+        "last_assistant_message": "PRIVATE FINAL ANSWER",
+        "stop_hook_active": false,
+    ]
+    let stop = SubagentHookObservation.parse(
+        try JSONSerialization.data(withJSONObject: stopPayload),
+        now: now.addingTimeInterval(12))
+    try expect(stop.event, .stop, "subagent stop event is parsed")
+    try expect(stop.agentHash, start.agentHash, "start and stop pair by opaque agent hash")
+    try expect(stop.hasAgentTranscriptPath, true, "child transcript presence is retained")
+    let encodedStop = String(decoding: try JSONEncoder().encode(stop), as: UTF8.self)
+    try expect(encodedStop.contains("PRIVATE FINAL ANSWER"), false, "assistant message is never persisted")
+    try expect(encodedStop.contains("/secret/child.jsonl"), false, "child transcript path is never persisted")
+
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let store = try SQLiteStore(path: root.appendingPathComponent("ledger.sqlite").path)
+    try store.recordSubagentHookObservation(start)
+    try store.recordSubagentHookObservation(stop)
+    let stored = try store.subagentHookObservations(limit: 10)
+    try expect(stored.count, 2, "subagent lifecycle observations round-trip")
+
+    let hooks = root.appendingPathComponent("hooks.json")
+    let originalStopCommand = "existing-stop-observer"
+    let original: [String: Any] = [
+        "hooks": [
+            "SessionStart": [["hooks": [["command": "start-hook", "type": "command"]]]],
+            "SubagentStop": [["hooks": [["command": originalStopCommand, "type": "command"]]]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: original).write(to: hooks)
+    let backup = try SubagentObservationHookInstaller.install(
+        command: "/Applications/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli",
+        hooksFile: hooks,
+        now: now)
+    try expect(backup != nil, true, "subagent hook install creates a backup")
+    let installedRoot = try JSONSerialization.jsonObject(with: Data(contentsOf: hooks)) as! [String: Any]
+    let installedEvents = installedRoot["hooks"] as! [String: Any]
+    let starts = installedEvents["SubagentStart"] as! [[String: Any]]
+    let stops = installedEvents["SubagentStop"] as! [[String: Any]]
+    try expect(starts.count, 1, "start observer is installed")
+    try expect(stops.count, 2, "existing stop observer is preserved")
+    let originalStopHooks = stops[0]["hooks"] as! [[String: Any]]
+    try expect(originalStopHooks[0]["command"] as? String, originalStopCommand, "existing stop command is unchanged")
+    let secondBackup = try SubagentObservationHookInstaller.install(
+        command: "/ignored",
+        hooksFile: hooks,
+        now: now.addingTimeInterval(1))
+    try expect(secondBackup == nil, true, "subagent hook install is idempotent")
+}
+
 func testConfigurationHookHealth() throws {
     let installedAt = Date(timeIntervalSince1970: 1_800_000_000)
     try expect(
@@ -1172,6 +1338,165 @@ func testConfigurationHookHealth() throws {
         "post-install hook event proves the chain")
 }
 
+func testSubagentHookHealthAndTrustInspection() throws {
+    let now = Date(timeIntervalSince1970: 1_800_200_000)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let hooks = root.appendingPathComponent("hooks.json")
+    let config = root.appendingPathComponent("config.toml")
+    let command = "'/Applications/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli' --subagent-lifecycle-hook"
+    let hooksObject: [String: Any] = [
+        "hooks": [
+            "SubagentStart": [["hooks": [["command": command, "type": "command"]]]],
+            "SubagentStop": [["hooks": [["command": command, "type": "command"]]]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: hooksObject).write(to: hooks)
+    let configText = """
+    [hooks.state.\"hooks.json:subagent_stop:0:0\"]
+    trusted_hash = \"sha256:stop\"
+    """
+    try Data(configText.utf8).write(to: config)
+
+    let local = SubagentHookConfigurationInspector.inspect(
+        hooksFile: hooks,
+        configFile: config,
+        now: now)
+    try expect(local.first(where: { $0.event == .start })?.installed, true, "start hook is installed")
+    try expect(local.first(where: { $0.event == .start })?.trusted, false, "missing start trust is untrusted")
+    try expect(local.first(where: { $0.event == .start })?.configSectionFound, false, "missing start trust section is visible")
+    try expect(local.first(where: { $0.event == .stop })?.trusted, true, "stop trust hash is recognized")
+
+    let appServer = [
+        CodexHookMetadata(
+            key: "hooks.json:subagent_start:0:0",
+            eventName: "SubagentStart",
+            command: command,
+            enabled: true,
+            currentHash: "sha256:start",
+            trustStatus: "untrusted"),
+        CodexHookMetadata(
+            key: "hooks.json:subagent_stop:0:0",
+            eventName: "SubagentStop",
+            command: command,
+            enabled: true,
+            currentHash: "sha256:stop",
+            trustStatus: "trusted"),
+    ]
+    let resolved = SubagentHookConfigurationInspector.inspect(
+        hooksFile: hooks,
+        configFile: config,
+        appServerHooks: appServer,
+        now: now)
+    try expect(resolved.first(where: { $0.event == .start })?.trustStatus, "untrusted", "hooks/list trust status wins")
+    try expect(resolved.first(where: { $0.event == .stop })?.trustStatus, "trusted", "hooks/list trusted status is retained")
+
+    let startUntrusted = SubagentHookHealth.evaluate(
+        configuration: resolved.first(where: { $0.event == .start })!,
+        latestObservationAt: nil,
+        latestSubagentActivityAt: nil,
+        now: now)
+    try expect(startUntrusted.state, .installedButUntrusted, "installed but untrusted state")
+    try expect(startUntrusted.reason, .hookUntrusted, "untrusted reason is distinct")
+
+    let stopAwaiting = SubagentHookHealth.evaluate(
+        configuration: resolved.first(where: { $0.event == .stop })!,
+        latestObservationAt: nil,
+        latestSubagentActivityAt: nil,
+        now: now)
+    try expect(stopAwaiting.state, .awaitingFirstEvent, "trusted empty ledger awaits first event")
+    try expect(stopAwaiting.reason, .noSubagentActivity, "empty ledger reason is distinct")
+
+    let stopInactive = SubagentHookHealth.evaluate(
+        configuration: resolved.first(where: { $0.event == .stop })!,
+        latestObservationAt: nil,
+        latestSubagentActivityAt: now.addingTimeInterval(5),
+        now: now.addingTimeInterval(10))
+    try expect(stopInactive.state, .stale, "rollout activity without hook event is stale")
+    try expect(stopInactive.reason, .hookInactive, "inactive hook reason is distinct")
+
+    let trustedAfterPriorActivity = SubagentHookConfiguration(
+        event: .start,
+        installed: true,
+        enabled: true,
+        trusted: true,
+        trustStatus: "trusted",
+        command: command,
+        currentHash: "sha256:start",
+        configSectionFound: true,
+        trustConfiguredAt: now.addingTimeInterval(20),
+        inspectedAt: now.addingTimeInterval(20))
+    let awaitingAfterTrust = SubagentHookHealth.evaluate(
+        configuration: trustedAfterPriorActivity,
+        latestObservationAt: nil,
+        latestSubagentActivityAt: now.addingTimeInterval(5),
+        now: now.addingTimeInterval(25))
+    try expect(awaitingAfterTrust.state, .awaitingFirstEvent, "activity before new trust does not mark the Hook stale")
+
+    let stopHealthy = SubagentHookHealth.evaluate(
+        configuration: resolved.first(where: { $0.event == .stop })!,
+        latestObservationAt: now.addingTimeInterval(8),
+        latestSubagentActivityAt: now.addingTimeInterval(5),
+        now: now.addingTimeInterval(10))
+    try expect(stopHealthy.state, .healthy, "recent lifecycle event is healthy")
+}
+
+func testSubagentHookHealthWithRolloutActivity() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let home = root.appendingPathComponent("codex")
+    let sessions = home.appendingPathComponent("sessions/2026/08/21")
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let hooks = home.appendingPathComponent("hooks.json")
+    let config = home.appendingPathComponent("config.toml")
+    let command = "guardian --subagent-lifecycle-hook"
+    let hooksObject: [String: Any] = [
+        "hooks": [
+            "SubagentStart": [["hooks": [["command": command, "type": "command"]]]],
+            "SubagentStop": [["hooks": [["command": command, "type": "command"]]]],
+        ],
+    ]
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try JSONSerialization.data(withJSONObject: hooksObject).write(to: hooks)
+    let configText = """
+    [hooks.state.\"hooks.json:subagent_start:0:0\"]
+    trusted_hash = \"sha256:start\"
+    [hooks.state.\"hooks.json:subagent_stop:0:0\"]
+    trusted_hash = \"sha256:stop\"
+    """
+    try Data(configText.utf8).write(to: config)
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 1_784_102_400)],
+        ofItemAtPath: config.path)
+    let child = sessions.appendingPathComponent("child.jsonl")
+    let childContent = [
+        event(type: "session_meta", payload: [
+            "id": "child-health", "cwd": "/project", "parent_thread_id": "parent-health",
+            "source": ["subagent": ["thread_spawn": ["agent_path": "/root/health-child"]]],
+        ]),
+        event(type: "event_msg", payload: [
+            "type": "sub_agent_activity", "event_id": "call-health",
+            "agent_thread_id": "child-health", "agent_path": "/root/health-child", "kind": "started",
+        ]),
+        event(type: "event_msg", payload: ["type": "task_started", "turn_id": "child-turn"]),
+    ].map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n") + "\n"
+    try Data(childContent.utf8).write(to: child)
+    let store = try SQLiteStore(path: root.appendingPathComponent("guardian.sqlite").path)
+    let scanner = SessionScanner(store: store, codexHome: home)
+    _ = try scanner.initialIndex()
+    let snapshot = try scanner.subagentHookHealth(now: Date(timeIntervalSince1970: 1_800_300_000))
+    try expect(snapshot.subagentActivityCount, 1, "rollout subagent activity is counted")
+    try expect(snapshot.start.state, .stale, "zero start Hook events with rollout activity is stale")
+    try expect(snapshot.start.reason, .hookInactive, "rollout activity distinguishes inactive Hook")
+    try expect(snapshot.stop.state, .stale, "zero stop Hook events with rollout activity is stale")
+    try store.recordSubagentHookHealthDiagnostic(SubagentHookHealthDiagnostic(snapshot: snapshot))
+    try expect(
+        try store.subagentHookHealthDiagnostics(limit: 1).first?.snapshot,
+        snapshot,
+        "health state has an independent diagnostic ledger")
+}
+
 func testSidebarIndexedCoverage() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1192,6 +1517,20 @@ func testSidebarIndexedCoverage() throws {
     let hiddenLog = sessions.appendingPathComponent("hidden-legacy.jsonl")
     let hiddenContent = olderContent.replacingOccurrences(of: "older-local", with: "hidden-legacy")
     try Data(hiddenContent.utf8).write(to: hiddenLog)
+    let unassignedLog = sessions.appendingPathComponent("unassigned-legacy.jsonl")
+    let unassignedContent = olderContent.replacingOccurrences(of: "older-local", with: "unassigned-legacy")
+    try Data(unassignedContent.utf8).write(to: unassignedLog)
+    let projectVisibleLog = sessions.appendingPathComponent("project-visible.jsonl")
+    try Data(olderContent.replacingOccurrences(of: "older-local", with: "project-visible").utf8).write(to: projectVisibleLog)
+    let worktreeVisibleLog = sessions.appendingPathComponent("worktree-visible.jsonl")
+    let worktreeVisibleContent = olderContent
+        .replacingOccurrences(of: "older-local", with: "worktree-visible")
+        .replacingOccurrences(of: "/projects/older", with: "/home/test/.codex/worktrees/abc/older")
+    try Data(worktreeVisibleContent.utf8).write(to: worktreeVisibleLog)
+    let automaticLog = sessions.appendingPathComponent("automatic-handoff.jsonl")
+    try Data(olderContent.replacingOccurrences(of: "older-local", with: "automatic-handoff").utf8).write(to: automaticLog)
+    let wrapperLog = sessions.appendingPathComponent("delegation-wrapper.jsonl")
+    try Data(olderContent.replacingOccurrences(of: "older-local", with: "delegation-wrapper").utf8).write(to: wrapperLog)
     let desktopState = """
     {
       "local-projects": {
@@ -1211,13 +1550,19 @@ func testSidebarIndexedCoverage() throws {
     let sql = """
     CREATE TABLE threads (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, archived INTEGER NOT NULL,
-        source TEXT NOT NULL, rollout_path TEXT NOT NULL, thread_source TEXT, cwd TEXT
+        source TEXT NOT NULL, rollout_path TEXT NOT NULL, thread_source TEXT, cwd TEXT,
+        preview TEXT NOT NULL DEFAULT ''
     );
-    INSERT INTO threads VALUES ('older-local', '较早的本地会话', 0, 'vscode', '\(olderLog.path)', 'user', '/projects/older');
-    INSERT INTO threads VALUES ('hidden-legacy', '侧边栏已移除', 0, 'vscode', '\(hiddenLog.path)', 'user', '/projects/older');
-    INSERT INTO threads VALUES ('internal', '内部任务', 0, '{"subagent":{"other":"guardian"}}', '\(olderLog.path)', 'subagent', '/projects/older');
-    INSERT INTO threads VALUES ('delegated', '委托任务', 0, 'vscode', '\(delegatedLog.path)', 'subagent', '/projects/older');
-    INSERT INTO threads VALUES ('archived', '已归档', 1, 'vscode', '\(olderLog.path)', 'user', '/projects/older');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('older-local', '较早的本地会话', 0, 'vscode', '\(olderLog.path)', 'user', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('hidden-legacy', '侧边栏已移除', 0, 'vscode', '\(hiddenLog.path)', 'user', '/projects/older', '');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('unassigned-legacy', '仅因目录匹配的历史会话', 0, 'vscode', '\(unassignedLog.path)', 'user', '/projects/older', '');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('project-visible', '项目分组可见会话', 0, 'vscode', '\(projectVisibleLog.path)', 'user', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('worktree-visible', '工作树续接会话', 0, 'vscode', '\(worktreeVisibleLog.path)', 'user', '/home/test/.codex/worktrees/abc/older', '');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('automatic-handoff', '自动交接', 0, 'exec', '\(automaticLog.path)', 'user', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('delegation-wrapper', '<codex_delegation>内部包装</codex_delegation>', 0, 'vscode', '\(wrapperLog.path)', 'subagent', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('internal', '内部任务', 0, '{"subagent":{"other":"guardian"}}', '\(olderLog.path)', 'subagent', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('delegated', '委托任务', 0, 'vscode', '\(delegatedLog.path)', 'subagent', '/projects/older', 'visible');
+    INSERT INTO threads (id, title, archived, source, rollout_path, thread_source, cwd, preview) VALUES ('archived', '已归档', 1, 'vscode', '\(olderLog.path)', 'user', '/projects/older', 'visible');
     """
     let sqlite = Process()
     sqlite.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -1230,12 +1575,32 @@ func testSidebarIndexedCoverage() throws {
     let scanner = SessionScanner(store: store, codexHome: home)
     _ = try scanner.initialIndex()
     let snapshot = try scanner.snapshot()
-    try expect(Set(snapshot.sessions.map(\.sessionID)), Set(["older-local", "delegated"]), "desktop-visible rollouts indexed")
+    let visibleSessions = Set(["older-local", "delegated", "project-visible", "worktree-visible"])
+    try expect(Set(snapshot.sessions.map(\.sessionID)), visibleSessions, "desktop-visible rollouts indexed")
     guard let session = snapshot.sessions.first(where: { $0.sessionID == "older-local" }) else {
         throw TestFailure.assertion("sidebar-visible session missing")
     }
     try expect(session.activity, .stopped, "completed sidebar session state")
     try expect(session.usage.total, 130, "sidebar session real token facts")
+
+    // The global recent-turn budget must not push an explicitly visible but
+    // older sidebar task out of the menu-bar snapshot.
+    let now = Date()
+    for index in 0...500 {
+        var offSidebar = TurnRecord(
+            sessionID: "off-sidebar-\(index)",
+            turnID: "turn-\(index)",
+            ordinal: 1,
+            cwd: "/projects/off-sidebar",
+            startedAt: now.addingTimeInterval(Double(index)))
+        offSidebar.status = .completed
+        offSidebar.completedAt = offSidebar.startedAt
+        try store.upsert(turn: offSidebar)
+    }
+    try expect(
+        Set(try scanner.snapshot().sessions.map(\.sessionID)),
+        visibleSessions,
+        "sidebar-visible history survives the global recent-turn budget")
 
     let refreshedQuota = event(type: "event_msg", payload: [
         "type": "token_count",
@@ -1313,6 +1678,10 @@ func testSessionHealthAndActivity() throws {
     try expect(snapshot.sessions.first(where: { $0.sessionID == "zombie" })?.activity, .interrupted, "stale running session interrupted")
     try expect(snapshot.activeSessions.map(\.risk), [.green, .amber], "60 percent boundary")
     try expect(snapshot.startFreshSessions.map(\.sessionID), ["resume-fresh", "zombie"], "stopped risk grouping")
+    try expect(
+        snapshot.sessions.filter { $0.risk == .red }.allSatisfy { $0.advice == .watch },
+        true,
+        "context pressure alone never recommends migration")
     try expect(snapshot.recentHealthySessions.map(\.sessionID), ["recent"], "healthy recent grouping")
     try expect(snapshot.highestRisk, .amber, "historical red not realtime radar")
 
@@ -1373,8 +1742,8 @@ func testSessionHealthAndActivity() throws {
         protectedResumed.resumedGuardedSession(
             from: protectedPrevious,
             requiringUserAttention: ["protected"])?.sessionID,
-        "protected",
-        "waiting task with current red risk and recent rebound can warn")
+        nil,
+        "same long task never warns from pressure and rebound alone")
     try expect(
         protectedResumed.resumedGuardedSession(
             from: protectedPrevious,
@@ -1616,49 +1985,6 @@ func testPetAnimationState() throws {
         "completed session transition excludes interruption")
 }
 
-func testHandoffContract() throws {
-    let valid = """
-    # 目标
-    完成现有功能并保持范围不变。
-    # 当前状态
-    已有候选实现，等待继续验证。这里补充足够的上下文说明，确保摘要不是空壳。
-    # 已验证完成与证据
-    构建与核心测试已通过。
-    # 关键决策与理由
-    使用现有事实源，避免复制旧历史。
-    # 不可变约束与风险
-    不归档旧任务，不扩大权限。
-    # 工作区、分支与变更文件
-    工作区和相关文件均已列明。
-    # 下一步
-    从运行态验证继续。
-    """
-    try expect(CodexHandoffMigrator.validateHandoff(valid), true, "valid handoff accepted")
-    try expect(CodexHandoffMigrator.validateHandoff("# 目标\n只有一句"), false, "incomplete handoff rejected")
-    try expect(
-        CodexHandoffMigrator.validateHandoff(valid + "\n<tokenpet_handoff>stale</tokenpet_handoff>"),
-        false,
-        "nested handoff control wrapper rejected")
-    try expect(
-        CodexHandoffMigrator.defaultPreparationMethod,
-        .fullSourceSummary,
-        "quality-first model summary is the default")
-
-    let resumed: [String: Any] = [
-        "thread": [
-            "turns": [
-                ["id": "done", "status": "completed"],
-                ["id": "active", "status": "inProgress"],
-            ],
-        ],
-    ]
-    try expect(CodexHandoffMigrator.activeTurnID(in: resumed), "active", "active writer detection")
-    try expect(
-        CodexHandoffMigrator.activeTurnID(in: ["thread": ["turns": [["id": "done", "status": "completed"]]]]),
-        nil,
-        "idle thread detection")
-}
-
 func testFloatingPetAnchorStability() throws {
     let visibleFrame = CGRect(x: 0, y: 25, width: 1_440, height: 875)
     let petSize = CGSize(width: 116, height: 126)
@@ -1691,6 +2017,22 @@ func testFloatingPetAnchorStability() throws {
         petSize: petSize,
         visibleFrame: visibleFrame)
     try expect(constrained, CGPoint(x: 116, y: 774), "pet footprint remains visible")
+
+    let leftScreen = CGRect(x: 0, y: 25, width: 1_440, height: 875)
+    let rightScreen = CGRect(x: 1_440, y: 0, width: 1_920, height: 1_080)
+    let crossDisplayAnchor = CGPoint(x: 1_700, y: 240)
+    let petScreen = FloatingPetGeometry.visibleFrame(
+        forPetAnchor: crossDisplayAnchor,
+        petSize: petSize,
+        screenVisibleFrames: [leftScreen, rightScreen])
+    try expect(petScreen, rightScreen, "expanded card does not select a display from its leading edge")
+    let crossDisplayOrigin = FloatingPetGeometry.panelOrigin(
+        forPetAnchor: crossDisplayAnchor,
+        panelSize: expandedSize)
+    try expect(
+        crossDisplayOrigin.x + expandedSize.width,
+        crossDisplayAnchor.x,
+        "cross-display expansion keeps the pet as the fixed trailing anchor")
 }
 
 func testFloatingSessionSnapshotStability() throws {
@@ -2087,8 +2429,8 @@ func testHandoffShadowTelemetry() throws {
     try expect(try store.handoffCosts().first?.status, .pending, "handoff cost starts pending")
     try store.reconcilePendingHandoffCosts(at: now.addingTimeInterval(10))
     let cost = try store.handoffCosts().first!
-    try expect(cost.status, .complete, "handoff cost reconciled")
-    try expect(cost.completedAt, destination.completedAt, "handoff completion uses provider turn time")
+    try expect(cost.status, .acknowledged, "visible acknowledgement is not continuation")
+    try expect(cost.completedAt, nil, "acknowledgement does not claim continuation")
     try expect(cost.totalUsage.input, 150, "handoff exact input")
     try expect(cost.totalUsage.cachedInput, 70, "handoff exact cached input")
     try expect(cost.totalUsage.cacheWriteInput, 15, "handoff exact cache-write input")
@@ -2100,7 +2442,8 @@ func testHandoffShadowTelemetry() throws {
 
     let summary = try store.shadowTelemetrySummary()
     try expect(summary.decisionCount, 6, "shadow aggregate decision count")
-    try expect(summary.completedHandoffCosts, 1, "shadow aggregate completed handoff")
+    try expect(summary.acknowledgedHandoffCosts, 1, "shadow aggregate acknowledged handoff")
+    try expect(summary.continuedHandoffCosts, 0, "shadow aggregate has no false continuation")
     try expect(summary.handoffUsage.total, 175, "shadow aggregate handoff tokens")
 
     let quickPending = HandoffCostRecord(
@@ -2114,7 +2457,7 @@ func testHandoffShadowTelemetry() throws {
     try store.upsertHandoffCost(quickPending)
     try store.reconcilePendingHandoffCosts()
     let quickCost = try store.handoffCosts().first { $0.id == quickPending.id }!
-    try expect(quickCost.status, .complete, "quick handoff reconciles without source model turn")
+    try expect(quickCost.status, .acknowledged, "quick handoff records visible acknowledgement")
     try expect(quickCost.sourceUsage, TokenUsage(), "quick handoff source cost is zero")
     try expect(quickCost.totalUsage.total, destination.usage.total, "quick handoff counts destination only")
     let updatedSummary = try store.shadowTelemetrySummary()
@@ -2131,7 +2474,7 @@ func testHandoffShadowTelemetry() throws {
         deliveryMethod: .historyInjection,
         startedAt: now.addingTimeInterval(30),
         payload: "local capsule")
-    try expect(injected.status, .complete, "zero-model handoff completes immediately")
+    try expect(injected.status, .seeded, "history injection is only seeded initially")
     try expect(injected.sourceUsage, TokenUsage(), "injected source cost is zero")
     try expect(injected.destinationUsage, TokenUsage(), "injected destination cost is zero")
     try expect(injected.totalUsage.total, 0, "zero-model handoff total is zero")
@@ -2145,15 +2488,39 @@ func testHandoffShadowTelemetry() throws {
         deliveryMethod: .historyInjection,
         startedAt: now.addingTimeInterval(31),
         payload: "bounded summary")
-    try expect(fullInjected.status, .pending, "full summary injection waits for source usage")
+    try expect(fullInjected.status, .seeded, "full summary injection remains seeded while usage reconciles")
     try store.upsertHandoffCost(fullInjected)
     try store.reconcilePendingHandoffCosts()
     let reconciledFullInjection = try store.handoffCosts().first { $0.id == fullInjected.id }!
-    try expect(reconciledFullInjection.status, .complete, "full summary injection reconciles source only")
+    try expect(reconciledFullInjection.status, .seeded, "source usage does not imply destination readiness")
     try expect(reconciledFullInjection.destinationUsage, TokenUsage(), "injected destination remains zero")
     try expect(reconciledFullInjection.totalUsage, source.usage, "full injection cost equals source summary")
+    var syntheticBootstrap = makeCompletedTurn(
+        session: "destination-injected-full", ordinal: 1, pressure: 0.10)
+    syntheticBootstrap.turnID = "auto-compact-1"
+    syntheticBootstrap.startedAt = now.addingTimeInterval(35)
+    syntheticBootstrap.completedAt = nil
+    syntheticBootstrap.status = .running
+    try store.upsert(turn: syntheticBootstrap)
+    try store.reconcilePendingHandoffCosts()
+    let afterBootstrap = try store.handoffCosts().first { $0.id == fullInjected.id }!
+    try expect(afterBootstrap.status, .seeded, "auto-compact bootstrap is not a real continuation")
+    var firstContinuation = makeCompletedTurn(
+        session: "destination-injected-full", ordinal: 2, pressure: 0.10)
+    firstContinuation.startedAt = now.addingTimeInterval(40)
+    firstContinuation.completedAt = now.addingTimeInterval(41)
+    try store.upsert(turn: firstContinuation)
+    try store.reconcilePendingHandoffCosts()
+    let continuedInjection = try store.handoffCosts().first { $0.id == fullInjected.id }!
+    try expect(continuedInjection.status, .continued, "first real destination turn proves continuation")
+    try expect(
+        continuedInjection.completedAt,
+        firstContinuation.startedAt,
+        "continued timestamp uses the real destination turn start")
     let injectionSummary = try store.shadowTelemetrySummary()
     try expect(injectionSummary.historyInjectionHandoffs, 2, "history injection aggregate count")
+    try expect(injectionSummary.seededHandoffCosts, 1, "unused injected task remains seeded")
+    try expect(injectionSummary.continuedHandoffCosts, 1, "used injected task becomes continued")
 
     let encodedLegacy = try JSONEncoder().encode(pending)
     var legacyObject = try JSONSerialization.jsonObject(with: encodedLegacy) as! [String: Any]
@@ -2163,207 +2530,11 @@ func testHandoffShadowTelemetry() throws {
     try expect(decodedLegacy.deliveryMethod, .acknowledgementTurn, "legacy cost defaults to acknowledgement")
 }
 
-func testHandoffHistoryInjection() throws {
-    try expect(
-        HandoffHistoryInjection.setThreadNameMethod,
-        "thread/name/set",
-        "current app-server thread naming method")
-    let handoff = """
-    # 目标
-    继续实现零确认轮接力。
-    # 当前状态
-    协议已确认。
-    # 已验证完成与证据
-    Schema 声明注入不启动用户轮次。
-    # 关键决策与理由
-    使用普通用户历史项。
-    # 不可变约束与风险
-    不使用 developer instruction。
-    # 工作区、分支与变更文件
-    /workspace
-    # 下一步
-    处理用户真实请求。
-    """
-    let params = HandoffHistoryInjection.requestParams(
-        threadID: "destination",
-        sourceThreadID: "source",
-        handoff: handoff)
-    try expect(params["threadId"] as? String, "destination", "injection destination thread")
-    let items = params["items"] as? [[String: Any]]
-    try expect(items?.count, 1, "single injected history item")
-    try expect(items?.first?["type"] as? String, "message", "responses message type")
-    try expect(items?.first?["role"] as? String, "user", "ordinary user history role")
-    let content = items?.first?["content"] as? [[String: Any]]
-    try expect(content?.first?["type"] as? String, "input_text", "responses input text type")
-    let text = content?.first?["text"] as? String ?? ""
-    try expect(text.contains(handoff), true, "validated handoff is injected")
-    try expect(text.contains("下一条真实用户消息后直接处理"), true, "first real request executes directly")
-    try expect(params["developerInstructions"] == nil, true, "no sticky developer instruction field")
-    try expect(params["systemInstructions"] == nil, true, "no system instruction field")
-    try expect(params["input"] == nil, true, "injection does not encode turn input")
-}
-
-func testQuickHandoffCapsule() throws {
-    let inherited = """
-    Codex Session Guardian handoff
-    <tokenpet_handoff>
-    # 目标
-    建立低成本且隐私安全的快速接力胶囊。
-    # 当前状态
-    影子观测已经完成。
-    # 已验证完成与证据
-    自动测试已经通过。
-    # 关键决策与理由
-    优先使用本地公开事实。
-    # 不可变约束与风险
-    不保存私有 reasoning，不扩大权限。
-    # 工作区、分支与变更文件
-    工作区为 CodexSessionGuard。
-    # 下一步
-    实现胶囊编译器并验证安全回退。
-    </tokenpet_handoff>
-    """
-    let facts = QuickHandoffFacts(
-        sourceThreadID: "quick",
-        title: "快速接力",
-        cwd: "/workspace/CodexSessionGuard",
-        userMessages: [inherited, "继续"],
-        publicAgentMessages: [
-            "完成影子观测。```sh\necho private\n``` https://signed.example/a?token=secret authorization: bearer-secret",
-        ],
-        changedFiles: ["/workspace/CodexSessionGuard/Sources/A.swift"])
-    let text = QuickHandoffCapsuleCompiler.build(facts: facts)!
-    try expect(QuickHandoffCapsuleCompiler.validate(text), true, "quick capsule completeness")
-    try expect(text.utf8.count <= QuickHandoffCapsuleCompiler.maximumCapsuleUTF8Bytes, true, "quick capsule hard byte budget")
-    try expect(text.contains("建立低成本且隐私安全"), true, "inherited goal recovered")
-    try expect(text.contains("signed.example"), false, "links removed")
-    try expect(text.contains("bearer-secret"), false, "credential value redacted")
-    try expect(text.contains("echo private"), false, "code block removed")
-    try expect(text.contains("<tokenpet_handoff>"), false, "handoff wrapper removed")
-
-    let latestStructured = """
-    # 目标
-    将小新建设为低干扰的会话健康与接力控制面。
-    # 当前状态
-    快速胶囊和成本观测已经实现。
-    # 已验证完成与证据
-    自动化测试二十二项全部通过。
-    # 关键决策与理由
-    只使用公开事实并优先零模型接力。
-    # 不可变约束与风险
-    不读取 reasoning，不覆盖用户已有改动。
-    # 工作区、分支与变更文件
-    /workspace/CodexSessionGuard
-    # 下一步
-    验证无确认回合的真实目标任务。
-    """
-    let recovered = QuickHandoffCapsuleCompiler.build(facts: QuickHandoffFacts(
-        sourceThreadID: "structured",
-        title: "小新语录",
-        cwd: "/workspace/CodexSessionGuard",
-        userMessages: [
-            inherited,
-            "仅使用此任务中已经存在的上下文，生成一份结构化交接摘要，以便在新会话中继续工作。",
-        ],
-        publicAgentMessages: [latestStructured],
-        changedFiles: [
-            "/private/tmp/codex-windowdump.swift",
-            "/workspace/CodexSessionGuard/Sources/TokenPetCore/QuickHandoff.swift",
-        ]))!
-    try expect(recovered.contains("将小新建设为低干扰"), true, "latest structured goal wins")
-    try expect(recovered.contains("验证无确认回合"), true, "latest structured next step wins")
-    try expect(recovered.contains("生成一份结构化交接摘要，以便"), false, "handoff control prompt excluded")
-    try expect(recovered.contains("/private/tmp"), false, "paths outside workspace excluded")
-    try expect(recovered.contains("QuickHandoff.swift"), true, "workspace path retained")
-    let titleBased = QuickHandoffCapsuleCompiler.build(facts: QuickHandoffFacts(
-        sourceThreadID: "title-based",
-        title: "龙陨守护 AI 序列帧美术生产",
-        cwd: "/workspace/dragonfall",
-        userMessages: ["就用 terra/xhigh 来做，我允许"],
-        publicAgentMessages: [
-            "已完成工具链审计，当前等待确认实现模型与深度。",
-            "下一步按锁定模型执行一个代表性动作金样。",
-        ]))!
-    try expect(titleBased.contains("龙陨守护 AI 序列帧美术生产"), true, "title anchors unstructured goal")
-    try expect(titleBased.contains("就用 terra/xhigh 来做，我允许"), true, "latest user instruction remains next step")
-    let longSection = String(repeating: "这是经过验证的长结构化事实，", count: 80)
-    let longStructured = """
-    # 目标
-    \(longSection)
-    # 当前状态
-    \(longSection)
-    # 已验证完成与证据
-    \(longSection)
-    # 关键决策与理由
-    \(longSection)
-    # 不可变约束与风险
-    \(longSection)
-    # 工作区、分支与变更文件
-    /workspace/CodexSessionGuard
-    # 下一步
-    \(longSection)
-    """
-    let boundedLong = QuickHandoffCapsuleCompiler.build(facts: QuickHandoffFacts(
-        sourceThreadID: "long",
-        title: "长摘要",
-        cwd: "/workspace/CodexSessionGuard",
-        publicAgentMessages: [longStructured],
-        changedFiles: (1...4).map {
-            "/workspace/CodexSessionGuard/Sources/VeryLongModuleName\($0)/VeryLongImplementationFile\($0).swift"
-        }))
-    try expect(boundedLong != nil, true, "long structured summary stays eligible")
-    try expect(
-        boundedLong!.utf8.count <= QuickHandoffCapsuleCompiler.maximumCapsuleUTF8Bytes,
-        true,
-        "ellipsis counts toward hard byte budget")
-    try expect(
-        QuickHandoffCapsuleCompiler.build(facts: QuickHandoffFacts(
-            sourceThreadID: "empty", title: "短", cwd: "/workspace")),
-        nil,
-        "incomplete capsule safely rejected")
-
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let rollout = root.appendingPathComponent("quick.jsonl")
-    let lines = [
-        event(type: "session_meta", payload: ["id": "quick-file", "cwd": "/workspace"]),
-        event(type: "event_msg", payload: [
-            "type": "user_message", "message": "请实现可验证的零模型快速接力胶囊。",
-        ]),
-        event(type: "response_item", payload: [
-            "type": "reasoning", "summary": ["LEAK_PRIVATE_REASONING"],
-        ]),
-        event(type: "response_item", payload: [
-            "type": "function_call_output", "output": "LEAK_TOOL_OUTPUT",
-        ]),
-        event(type: "event_msg", payload: [
-            "type": "patch_apply_end",
-            "changes": [
-                "/workspace/Sources/Quick.swift": [
-                    "type": "update", "unified_diff": "LEAK_PATCH_BODY",
-                ],
-            ],
-        ]),
-        event(type: "event_msg", payload: [
-            "type": "task_complete", "last_agent_message": "快速胶囊已实现并通过静态验证，下一步接入安全回退。",
-        ]),
-    ]
-    let content = lines.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n") + "\n"
-    try Data(content.utf8).write(to: rollout)
-    let compiled = try QuickHandoffCapsuleCompiler.compile(
-        sourceThreadID: "quick-file",
-        title: "快速接力",
-        cwd: "/workspace",
-        rolloutPath: rollout.path)!
-    try expect(compiled.sourceBytesRead, content.utf8.count, "bounded rollout bytes recorded")
-    try expect(compiled.text.contains("/workspace/Sources/Quick.swift"), true, "patch path retained")
-    try expect(compiled.text.contains("LEAK_PATCH_BODY"), false, "patch body ignored")
-    try expect(compiled.text.contains("LEAK_TOOL_OUTPUT"), false, "tool output ignored")
-    try expect(compiled.text.contains("LEAK_PRIVATE_REASONING"), false, "reasoning ignored")
-}
-
 func testRoutingPreflightPolicy() throws {
+    try expect(
+        CodexManagedHandoff.instruction,
+        "总结必要上下文，开启新的会话任务",
+        "fresh-task control surface is one exact Codex instruction")
     let inputJSON = Data(#"{"session_id":"session-1","transcript_path":"/private/rollout.jsonl","cwd":"/workspace","model":"gpt-5.6-sol","permission_mode":"default","turn_id":"turn-1","prompt":"翻译为英文：测试提交前配置拦截。"}"#.utf8)
     let input = try JSONDecoder().decode(RoutingPreflightHookInput.self, from: inputJSON)
     try expect(input.sessionID, "session-1", "hook snake-case session id")
@@ -2471,6 +2642,77 @@ func testRoutingPreflightPolicy() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let store = try SQLiteStore(path: root.appendingPathComponent("guardian.sqlite").path)
+    let codexState = root.appendingPathComponent("state_5.sqlite")
+    let sqlite = Process()
+    sqlite.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    sqlite.arguments = [codexState.path, """
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY, model TEXT, reasoning_effort TEXT,
+            source TEXT, thread_source TEXT, archived INTEGER, preview TEXT
+        );
+        INSERT INTO threads VALUES (
+            'fresh-user', 'gpt-5.6-sol', 'medium', 'vscode', 'user', 0, ''
+        );
+        INSERT INTO threads VALUES (
+            'child-agent', 'gpt-5.6-sol', 'medium',
+            '{"subagent":{"other":"worker"}}', 'subagent', 0, 'child'
+        );
+        """]
+    try sqlite.run()
+    sqlite.waitUntilExit()
+    try expect(sqlite.terminationStatus, 0, "routing state fixture")
+    try expect(
+        CodexThreadSelectionReader.isTopLevelUserTask(
+            sessionID: "fresh-user", databasePath: codexState.path),
+        true,
+        "empty preview does not hide a fresh top-level user task")
+    try expect(
+        CodexThreadSelectionReader.isTopLevelUserTask(
+            sessionID: "child-agent", databasePath: codexState.path),
+        false,
+        "subagent remains excluded from routing")
+    let freshRollout = root.appendingPathComponent("fresh.jsonl")
+    let sessionMeta = event(type: "session_meta", payload: [
+        "id": "fresh-session",
+        "session_id": "fresh-session",
+        "source": "vscode",
+        "thread_source": "user",
+    ])
+    let turnContext = event(type: "turn_context", payload: [
+        "model": "gpt-5.6-sol",
+        "effort": "medium",
+    ])
+    try Data(sessionMeta + [0x0A] + turnContext + [0x0A]).write(to: freshRollout)
+    let freshFacts = CodexRolloutPreflightReader.read(
+        sessionID: "fresh-session",
+        transcriptPath: freshRollout.path)
+    try expect(freshFacts?.isTopLevelUserTask, true, "rollout identifies a new top-level task")
+    try expect(
+        freshFacts?.selection,
+        RoutingSelection(model: "gpt-5.6-sol", reasoningEffort: "medium"),
+        "turn_context supplies new-task routing configuration")
+    try expect(
+        RoutingReplaySafety.lifecycleState(transcriptPath: freshRollout.path),
+        .notStarted,
+        "fresh rollout is eligible before its first provider call")
+    try expect(
+        RoutingReplaySafety.isTurnActive(transcriptPath: freshRollout.path),
+        false,
+        "fresh rollout is not mistaken for an active writer")
+    let subagentRollout = root.appendingPathComponent("subagent.jsonl")
+    let subagentMeta = event(type: "session_meta", payload: [
+        "id": "child-session",
+        "session_id": "child-session",
+        "source": "vscode",
+        "thread_source": "subagent",
+    ])
+    try Data(subagentMeta + [0x0A] + turnContext + [0x0A]).write(to: subagentRollout)
+    try expect(
+        CodexRolloutPreflightReader.read(
+            sessionID: "child-session",
+            transcriptPath: subagentRollout.path)?.isTopLevelUserTask,
+        false,
+        "rollout fallback still excludes subagents")
     let activeRollout = root.appendingPathComponent("active.jsonl")
     let startedLine = event(type: "event_msg", payload: ["type": "task_started"])
     try Data(startedLine + [0x0A]).write(to: activeRollout)
@@ -2510,9 +2752,32 @@ func testRoutingPreflightPolicy() throws {
     let observation = RoutingPreflightObservation(
         id: "preflight-1",
         sessionID: input.sessionID,
+        observedAt: Date(timeIntervalSince1970: 100),
         current: expensive,
         decision: simple!,
         classifierUsage: classifierUsage)
+    var blockedTurn = TurnRecord(
+        sessionID: input.sessionID,
+        turnID: "blocked-turn",
+        ordinal: 1,
+        cwd: input.cwd,
+        startedAt: Date(timeIntervalSince1970: 99))
+    blockedTurn.completedAt = Date(timeIntervalSince1970: 101)
+    try expect(
+        observation.isSuperseded(by: blockedTurn),
+        false,
+        "the blocked turn completing after the hook keeps the decision visible")
+    var replayedTurn = TurnRecord(
+        sessionID: input.sessionID,
+        turnID: "replayed-turn",
+        ordinal: 2,
+        cwd: input.cwd,
+        startedAt: Date(timeIntervalSince1970: 102))
+    replayedTurn.status = .completed
+    try expect(
+        observation.isSuperseded(by: replayedTurn),
+        true,
+        "a later replay turn retires the stale preflight decision")
     try store.recordRoutingPreflight(observation)
     let loaded = try store.routingPreflights(limit: 1)
     try expect(loaded.first?.blocked, true, "preflight audit persists decision")
@@ -2521,6 +2786,21 @@ func testRoutingPreflightPolicy() throws {
     let persisted = String(decoding: try JSONEncoder().encode(loaded), as: UTF8.self)
     try expect(persisted.contains(input.prompt), false, "preflight audit never persists prompt")
     try expect(persisted.contains(input.transcriptPath!), false, "preflight audit never persists transcript path")
+
+    let diagnostic = RoutingHookDiagnostic(
+        id: "hook-diagnostic-1",
+        sessionID: input.sessionID,
+        outcome: .filtered,
+        reasonCode: "lifecycle_unknown",
+        inputKeys: ["prompt", "session_id", "transcript_path"])
+    try store.recordRoutingHookDiagnostic(diagnostic)
+    let loadedDiagnostics = try store.routingHookDiagnostics(limit: 1)
+    try expect(loadedDiagnostics.first?.outcome, .filtered, "hook terminal outcome is persisted")
+    try expect(loadedDiagnostics.first?.reasonCode, "lifecycle_unknown", "hook reason is inspectable")
+    try expect(loadedDiagnostics.first?.sessionHash == input.sessionID, false, "hook diagnostic hashes session id")
+    let persistedDiagnostics = String(decoding: try JSONEncoder().encode(loadedDiagnostics), as: UTF8.self)
+    try expect(persistedDiagnostics.contains(input.prompt), false, "hook diagnostic never persists prompt")
+    try expect(persistedDiagnostics.contains(input.transcriptPath!), false, "hook diagnostic never persists transcript path")
 
     let bypass = RoutingPreflightBypass(sessionID: input.sessionID, prompt: input.prompt)
     try store.saveRoutingPreflightBypass(bypass)
@@ -2539,6 +2819,30 @@ func testRoutingPreflightPolicy() throws {
         reasoningEffort: "medium")
     try expect(replayParams["model"] as? String, "gpt-5.6-luna", "replay overrides model for this thread")
     try expect(replayParams["effort"] as? String, "medium", "replay overrides effort for this thread")
+    let settingsParams = CodexDesktopTurnReplay.threadSettingsParams(
+        model: "gpt-5.6-luna",
+        reasoningEffort: "medium")
+    try expect(settingsParams["model"] as? String, "gpt-5.6-luna", "thread setting selects replay model")
+    try expect(settingsParams["effort"] as? String, "medium", "thread setting selects replay effort")
+    try expect(
+        CodexDesktopIPCProtocol.version(
+            method: "thread-follower-update-thread-settings",
+            params: [:]),
+        1,
+        "Desktop settings update uses its declared v1 protocol")
+    let verifiedTurn = event(type: "turn_context", payload: [
+        "turn_id": "replay-turn",
+        "model": "gpt-5.6-luna",
+        "effort": "medium",
+    ])
+    try expect(
+        CodexDesktopTurnReplay.turnConfiguration(in: verifiedTurn, turnID: "replay-turn"),
+        RoutingSelection(model: "gpt-5.6-luna", reasoningEffort: "medium"),
+        "replay verification reads the actual turn configuration")
+    try expect(
+        CodexDesktopTurnReplay.turnConfiguration(in: verifiedTurn, turnID: "different-turn"),
+        nil,
+        "replay verification is scoped to the returned turn id")
 
     let capture = ReplayCapture()
     let semaphore = DispatchSemaphore(value: 0)
@@ -2562,6 +2866,7 @@ func testRoutingPreflightPolicy() throws {
         "blocked prompt reaches the in-memory app bridge")
     try expect(semaphore.wait(timeout: .now() + 2), .success, "bridge receives prompt promptly")
     try expect(capture.get(), replay, "bridge preserves the pending replay contract")
+
 }
 
 func testRoutingHookInstaller() throws {
@@ -2618,11 +2923,13 @@ let tests: [(String, () throws -> Void)] = [
     ("cross-project isolation", testProjectIsolation),
     ("subagent filtering and migration", testSubagentFilteringAndMigration),
     ("multi-agent execution audit", testMultiAgentExecutionAudit),
+    ("subagent hook privacy ledger", testSubagentHookLedger),
     ("configuration hook health", testConfigurationHookHealth),
+    ("subagent hook health and trust inspection", testSubagentHookHealthAndTrustInspection),
+    ("subagent hook health with rollout activity", testSubagentHookHealthWithRolloutActivity),
     ("sidebar-indexed coverage", testSidebarIndexedCoverage),
     ("session health, grouping, and activity", testSessionHealthAndActivity),
     ("pet animation event mapping", testPetAnimationState),
-    ("handoff contract validation", testHandoffContract),
     ("floating pet anchor stability", testFloatingPetAnchorStability),
     ("floating session snapshot stability", testFloatingSessionSnapshotStability),
     ("floating visibility frame restoration", testFloatingVisibilityPreservesFrameAfterRestore),
@@ -2633,8 +2940,6 @@ let tests: [(String, () throws -> Void)] = [
     ("live activity truncation and partial file", testLiveActivityTruncationAndPartialFile),
     ("live activity monitor latency", testLiveActivityMonitorLatency),
     ("handoff shadow telemetry and privacy", testHandoffShadowTelemetry),
-    ("quick handoff capsule privacy and budget", testQuickHandoffCapsule),
-    ("handoff history injection protocol", testHandoffHistoryInjection),
 ]
 
 var failures = 0

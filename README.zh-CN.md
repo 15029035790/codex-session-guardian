@@ -18,7 +18,7 @@ Codex Session Guardian 将本机 Codex 任务事实整理成个人任务经济�
 
 内部产品定义是：**越来越懂用户工作方式的 Codex 自适应执行优化器**。桌宠、多任务雷达和实时活动是低干扰入口；核心价值是为不同任务选择最低充分的模型与推理深度，判断 Token 是否换来有效产出，并发现执行过程和协作配置中的系统性浪费。
 
-产品北极星、个人任务地图和三阶段执行计划见[《小新 Token 效率战略与分阶段执行计划》](docs/TOKEN_EFFICIENCY_STRATEGY.md)。总结接力是执行健康阶段的低频恢复手段，其专项机制和安全边界见[《总结接力专项决策与低 Token 架构策略》](docs/HANDOFF_STRATEGY.md)。
+冻结的产品定位和授权边界见[《小新会话管家产品宪章》](docs/PRODUCT_CONSTITUTION.md)，关键控制与观测前提见[《核心技术探针与证据账本》](docs/TECHNICAL_SPIKES.md)，个人任务地图和阶段计划见[《小新 Token 效率战略与分阶段执行计划》](docs/TOKEN_EFFICIENCY_STRATEGY.md)。总结接力是执行健康阶段的低频恢复手段，其专项机制和安全边界见[《总结接力专项决策与低 Token 架构策略》](docs/HANDOFF_STRATEGY.md)。
 
 我们不以逐项复制快速扩张的 [Awesome Codex Pet](https://github.com/legeling/awesome-codex-pet) 生态为目标。宠物商城、角色生成器、广泛素材格式兼容和桌面世界养成都属于明确非目标，除非未来能直接服务 Guardian Core。
 
@@ -42,7 +42,7 @@ Codex Session Guardian 将本机 Codex 任务事实整理成个人任务经济�
 - **悬浮任务卡片**：展示全部进行中任务；hover 或拖拽期间，即使扫描快照短暂缺项也不会出现 2→1→2 抖动，并可从菜单栏面板随时隐藏或恢复。
 - **隐私安全的实时活动**：每个活跃卡片按 rollout 实时展示真实语义阶段、最后更新时间和最多两行公开答复；忽略私有 reasoning、工具参数与原始工具输出。
 - **行动优先提醒**：需要你批准或回答、以及任务失败时，立即展开小新悬浮任务卡并显示气泡；常规执行与完成历史不会生成收件箱。
-- **质量优先的低频接力**：由源任务模型生成结构化摘要，Guardian 严格校验七个必需章节后再无确认回合注入新任务；启发式脚本胶囊不再作为默认摘要。
+- **Codex 自主“总结并新开”**：用户在空闲任务上明确点击后，小新只推入“总结必要上下文，开启新的会话任务”；摘要范围、目标任务创建与后续调度都由 Codex 自己完成。
 - **两套动画主题**：舞蹈小新和像素小新可整套切换，选择会持久化。
 - **有状态的小新性格**：根据工作、多任务、刷新、风险、交接、完成、Hover、拖拽和双击说不同台词，提供关闭、轻量和活跃三档，默认轻量。
 - **本地隐私**：只保存 Token 事实和文件游标，不保存提示词、回复、源码或工具正文。
@@ -110,7 +110,23 @@ swift build
 
 安装或升级 handler 后，在 Codex CLI 中打开 `/hooks` 审核并信任新命令。可用 `--routing-preflights --limit 20` 查看不含提示词的本地判定账本；模型兜底发生时，账本还会记录其 provider Token，便于判断预检本身是否值得。
 
-默认入口是 `terra/medium`。高置信度判断能力不足时，先升级到 `terra/high`，仍不足再升级到 `sol/medium`；明显过配仍可降档。配置不匹配时，小新悬浮卡会在任务执行前自动展开，显示当前配置、建议配置和原因；点击“切换并重放”后，只为该任务覆盖 model/effort 并重放刚被阻断的消息。原始消息仅通过权限为 `0600` 的本机 socket 暂存在小新内存，不写入 SQLite，重放或重启后立即清除。任务结束后，小新先判断质量证据，再比较 provider Token 和耗时：只有完成但没有验证不能算质量通过。菜单栏只展示路线基线和已测得的本地对照，不会为尚未知晓的未来任务推断配置。
+小新还可以安装纯观察型 `SubagentStart` 和 `SubagentStop` handler。它们不会阻断、修改或启动任务。账本只保存父任务、回合、子 Agent 的不可逆哈希，生命周期时间、Agent 类型、模型、权限模式、路径是否存在和输入字段名；不保存项目路径、transcript 路径、提示词、最终答复或原始 ID：
+
+```bash
+"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --install-subagent-hooks \
+  --hook-command "$PWD/outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --hooks-file "$HOME/.codex/hooks.json"
+
+"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
+  --subagent-hook-diagnostics --limit 100
+```
+
+安装后需完整重启一次 Codex Desktop，让后续任务加载新的 Hook 快照。当前 Hook 输入不提供 `fork_turns`；诊断时会把生命周期账本与父任务 rollout 中的 `spawn_agent` 记录关联，不会虚构上下文继承方式。
+
+小新会通过 Codex `hooks/list` 检查两个 handler 的实际启用与信任状态，并把“没有子 Agent 活动”“尚未信任”和“已有 rollout 活动但 Hook 未送达”分开记录。异常只在小新悬浮提醒中出现；子 Agent 仍不会进入菜单栏会话列表。可运行 `--subagent-hook-health` 查看脱敏健康账本。
+
+默认入口是 `sol/medium`。小新只针对已经到来的当前任务判断是否应该升档或降档，不预测用户的下一项任务；`terra/high` 只用于已经冻结、跨模块且判断密集，并有证据表明低配置会显著增加返工风险的实现任务。配置不匹配时，小新悬浮卡会在任务执行前自动展开，显示当前配置、建议配置和原因；“切换配置并继续”只为该任务覆盖 model/effort 并重放被阻断的消息，“按原配置继续”则不改配置直接重放。原始消息仅通过权限为 `0600` 的本机 socket 暂存在小新内存，不写入 SQLite，重放或重启后立即清除。真实复验已确认切换后的新回合 `turn_context` 与用户确认的 model/effort 一致；任务结束后旧阻断卡会自动淘汰。任务结束后，小新先判断质量证据，再比较 provider Token 和耗时：只有完成但没有验证不能算质量通过。
 
 受控对照可写入脱敏的本地评测账本，并随时读回：
 
@@ -157,7 +173,7 @@ scripts/package-app.sh dist/Codex-Session-Guardian.app
 
 正常监控不会上传会话数据。实时活动仅在内存中保留每个会话的当前状态和公开输出短摘要，不写入 Guardian SQLite；私有 reasoning、完整工具参数、原始工具输出、stdout 和 stderr 不会进入实时 UI 状态。接力影子观测只保存版本化数值特征、枚举原因码、任务/回合 ID 和 provider Token 分类，不保存标题、工作目录、提示词、回复或交接正文，并限制为最近 2,000 条决策和 200 次接力。素材导入脚本只有在用户手动运行时才会下载经过 SHA-256 固定的公开图集。
 
-“总结并新开”只在用户明确操作后，通过本机 Codex Desktop owner 进程或本机 app-server 执行；不会自动归档或删除原任务。
+“总结并新开”只在用户明确操作且任务空闲后，通过本机 Codex Desktop owner 进程发送固定指令；小新不会自动归档、删除、总结、注入或创建任务。新任务是否创建和可继续由 Codex 自己负责，需由用户确认。
 
 ## 素材和许可
 

@@ -33,6 +33,7 @@ public final class SQLiteStore: @unchecked Sendable {
         else { throw StoreError.open(message) }
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA synchronous=NORMAL")
+        try execute("PRAGMA busy_timeout=2000")
         try execute("""
             CREATE TABLE IF NOT EXISTS file_cursors (
                 identity TEXT PRIMARY KEY,
@@ -141,6 +142,41 @@ public final class SQLiteStore: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS routing_preflight_recent ON routing_preflight_observations(observed_at DESC)")
         try execute("""
+            CREATE TABLE IF NOT EXISTS routing_hook_diagnostics (
+                id TEXT PRIMARY KEY,
+                observed_at REAL NOT NULL,
+                outcome TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                data BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS routing_hook_diagnostics_recent ON routing_hook_diagnostics(observed_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS subagent_hook_observations (
+                id TEXT PRIMARY KEY,
+                observed_at REAL NOT NULL,
+                event_name TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                session_hash TEXT,
+                agent_hash TEXT,
+                data BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS subagent_hook_recent ON subagent_hook_observations(observed_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS subagent_hook_agent ON subagent_hook_observations(agent_hash, observed_at)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS subagent_hook_health_diagnostics (
+                id TEXT PRIMARY KEY,
+                observed_at REAL NOT NULL,
+                data BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS subagent_hook_health_recent ON subagent_hook_health_diagnostics(observed_at DESC)")
+        try execute("""
             CREATE TABLE IF NOT EXISTS routing_preflight_bypasses (
                 session_hash TEXT NOT NULL,
                 prompt_hash TEXT NOT NULL,
@@ -234,6 +270,32 @@ public final class SQLiteStore: @unchecked Sendable {
                 index += 1
             }
             sqlite3_bind_int(statement, index, Int32(limit))
+            var result: [TurnRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(TurnRecord.self, from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
+    /// Returns all indexed turns for the sessions Desktop explicitly exposes in
+    /// its sidebar. This deliberately bypasses the general recent-turn budget:
+    /// a visible task must not vanish merely because other tasks have produced
+    /// more than `DashboardSnapshot`'s global history limit.
+    public func turns(sessionIDs: Set<String>) throws -> [TurnRecord] {
+        guard !sessionIDs.isEmpty else { return [] }
+        return try locked {
+            let ids = sessionIDs.sorted()
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+            let statement = try prepare("""
+                SELECT data FROM turns
+                WHERE session_id IN (\(placeholders))
+                ORDER BY COALESCE(completed_at, started_at) DESC
+                """)
+            defer { sqlite3_finalize(statement) }
+            for (offset, sessionID) in ids.enumerated() {
+                bind(sessionID, to: statement, at: Int32(offset + 1))
+            }
             var result: [TurnRecord] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 result.append(try decoder.decode(TurnRecord.self, from: data(statement, column: 0)))
@@ -584,6 +646,140 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func recordRoutingHookDiagnostic(_ diagnostic: RoutingHookDiagnostic) throws {
+        try locked {
+            let statement = try prepare("""
+                INSERT INTO routing_hook_diagnostics(id, observed_at, outcome, reason_code, data, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(diagnostic.id, to: statement, at: 1)
+            sqlite3_bind_double(statement, 2, diagnostic.observedAt.timeIntervalSince1970)
+            bind(diagnostic.outcome.rawValue, to: statement, at: 3)
+            bind(diagnostic.reasonCode, to: statement, at: 4)
+            bind(try encoder.encode(diagnostic), to: statement, at: 5)
+            sqlite3_bind_double(statement, 6, Date().timeIntervalSince1970)
+            try stepDone(statement)
+            try execute("""
+                DELETE FROM routing_hook_diagnostics
+                WHERE id NOT IN (
+                    SELECT id FROM routing_hook_diagnostics
+                    ORDER BY observed_at DESC LIMIT 2000
+                )
+                """)
+        }
+    }
+
+    public func routingHookDiagnostics(limit: Int = 100) throws -> [RoutingHookDiagnostic] {
+        try locked {
+            let statement = try prepare("""
+                SELECT data FROM routing_hook_diagnostics
+                ORDER BY observed_at DESC, id ASC LIMIT ?
+                """)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            var result: [RoutingHookDiagnostic] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(
+                    RoutingHookDiagnostic.self,
+                    from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
+    public func recordSubagentHookObservation(_ observation: SubagentHookObservation) throws {
+        try locked {
+            let statement = try prepare("""
+                INSERT INTO subagent_hook_observations(
+                    id, observed_at, event_name, outcome, reason_code,
+                    session_hash, agent_hash, data, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(observation.id, to: statement, at: 1)
+            sqlite3_bind_double(statement, 2, observation.observedAt.timeIntervalSince1970)
+            bind(observation.event.rawValue, to: statement, at: 3)
+            bind(observation.outcome.rawValue, to: statement, at: 4)
+            bind(observation.reasonCode, to: statement, at: 5)
+            bind(observation.sessionHash, to: statement, at: 6)
+            bind(observation.agentHash, to: statement, at: 7)
+            bind(try encoder.encode(observation), to: statement, at: 8)
+            sqlite3_bind_double(statement, 9, Date().timeIntervalSince1970)
+            try stepDone(statement)
+            try execute("""
+                DELETE FROM subagent_hook_observations
+                WHERE id NOT IN (
+                    SELECT id FROM subagent_hook_observations
+                    ORDER BY observed_at DESC LIMIT 5000
+                )
+                """)
+        }
+    }
+
+    public func subagentHookObservations(limit: Int = 100) throws -> [SubagentHookObservation] {
+        try locked {
+            let statement = try prepare("""
+                SELECT data FROM subagent_hook_observations
+                ORDER BY observed_at DESC, id ASC LIMIT ?
+                """)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            var result: [SubagentHookObservation] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(
+                    SubagentHookObservation.self,
+                    from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
+    public func recordSubagentHookHealthDiagnostic(
+        _ diagnostic: SubagentHookHealthDiagnostic
+    ) throws {
+        try locked {
+            let statement = try prepare("""
+                INSERT INTO subagent_hook_health_diagnostics(id, observed_at, data, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(diagnostic.id, to: statement, at: 1)
+            sqlite3_bind_double(statement, 2, diagnostic.observedAt.timeIntervalSince1970)
+            bind(try encoder.encode(diagnostic), to: statement, at: 3)
+            sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+            try stepDone(statement)
+            try execute("""
+                DELETE FROM subagent_hook_health_diagnostics
+                WHERE id NOT IN (
+                    SELECT id FROM subagent_hook_health_diagnostics
+                    ORDER BY observed_at DESC LIMIT 500
+                )
+                """)
+        }
+    }
+
+    public func subagentHookHealthDiagnostics(
+        limit: Int = 100
+    ) throws -> [SubagentHookHealthDiagnostic] {
+        try locked {
+            let statement = try prepare("""
+                SELECT data FROM subagent_hook_health_diagnostics
+                ORDER BY observed_at DESC, id ASC LIMIT ?
+                """)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            var result: [SubagentHookHealthDiagnostic] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(try decoder.decode(
+                    SubagentHookHealthDiagnostic.self,
+                    from: data(statement, column: 0)))
+            }
+            return result
+        }
+    }
+
     public func saveRoutingPreflightBypass(_ bypass: RoutingPreflightBypass) throws {
         try locked {
             let statement = try prepare("""
@@ -721,39 +917,58 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
-    public func reconcilePendingHandoffCosts(at now: Date = Date()) throws {
+    public func reconcilePendingHandoffCosts(at _: Date = Date()) throws {
         try locked {
-            let statement = try prepare("SELECT data FROM handoff_costs WHERE status = ?")
-            bind(HandoffCostStatus.pending.rawValue, to: statement, at: 1)
-            var pending: [HandoffCostRecord] = []
+            let statement = try prepare("SELECT data FROM handoff_costs WHERE status != ?")
+            bind(HandoffCostStatus.complete.rawValue, to: statement, at: 1)
+            var records: [HandoffCostRecord] = []
             while sqlite3_step(statement) == SQLITE_ROW {
-                pending.append(try decoder.decode(HandoffCostRecord.self, from: data(statement, column: 0)))
+                records.append(try decoder.decode(HandoffCostRecord.self, from: data(statement, column: 0)))
             }
             sqlite3_finalize(statement)
 
-            for var record in pending {
-                let source: TurnRecord?
-                if let sourceTurnID = record.sourceSummaryTurnID {
-                    source = try turnUnlocked(id: "\(record.sourceSessionID):\(sourceTurnID)")
-                    guard source != nil else { continue }
-                } else {
-                    source = nil
+            for var record in records {
+                let original = record
+                var acknowledgementExists = false
+                if record.sourceUsage == nil {
+                    if let sourceTurnID = record.sourceSummaryTurnID,
+                       let source = try turnUnlocked(id: "\(record.sourceSessionID):\(sourceTurnID)")
+                    {
+                        record.sourceUsage = source.usage
+                    } else if record.sourceSummaryTurnID == nil {
+                        record.sourceUsage = TokenUsage()
+                    }
                 }
-                let destination: TurnRecord?
-                if let destinationTurnID = record.destinationAcknowledgementTurnID {
-                    destination = try turnUnlocked(
-                        id: "\(record.destinationSessionID):\(destinationTurnID)")
-                    guard destination != nil else { continue }
-                } else {
-                    destination = nil
+
+                if record.destinationUsage == nil {
+                    if let destinationTurnID = record.destinationAcknowledgementTurnID,
+                       let acknowledgement = try turnUnlocked(
+                           id: "\(record.destinationSessionID):\(destinationTurnID)")
+                    {
+                        acknowledgementExists = true
+                        record.destinationUsage = acknowledgement.usage
+                    } else if record.deliveryMethod == .historyInjection {
+                        record.destinationUsage = TokenUsage()
+                    }
+                } else if let destinationTurnID = record.destinationAcknowledgementTurnID {
+                    acknowledgementExists = try turnUnlocked(
+                        id: "\(record.destinationSessionID):\(destinationTurnID)") != nil
                 }
-                record.sourceUsage = source?.usage ?? TokenUsage()
-                record.destinationUsage = destination?.usage ?? TokenUsage()
-                record.completedAt = [source?.completedAt, destination?.completedAt]
-                    .compactMap { $0 }
-                    .max() ?? now
-                record.status = .complete
-                try upsertHandoffCostUnlocked(record)
+
+                record.status = acknowledgementExists ? .acknowledged
+                    : (record.deliveryMethod == .historyInjection ? .seeded : .pending)
+                record.completedAt = nil
+
+                if let continuation = try latestTurnUnlocked(
+                    sessionID: record.destinationSessionID,
+                    excludingTurnID: record.destinationAcknowledgementTurnID,
+                    startedAtOrAfter: record.startedAt)
+                {
+                    record.status = .continued
+                    record.completedAt = continuation.startedAt
+                }
+
+                if record != original { try upsertHandoffCostUnlocked(record) }
             }
         }
     }
@@ -761,19 +976,22 @@ public final class SQLiteStore: @unchecked Sendable {
     public func shadowTelemetrySummary() throws -> HandoffShadowTelemetrySummary {
         let decisions = try shadowDecisions(limit: 2000)
         let costs = try handoffCosts(limit: 200)
-        let completed = costs.filter { $0.status == .complete }
-        let usage = completed.reduce(into: TokenUsage()) { $0 = $0 + $1.totalUsage }
+        let legacyCompleted = costs.filter { $0.status == .complete }
+        let usage = costs.reduce(into: TokenUsage()) { $0 = $0 + $1.totalUsage }
         return HandoffShadowTelemetrySummary(
             decisionCount: decisions.count,
             continueCount: decisions.filter { $0.recommendation == .continueCurrent }.count,
             observeCount: decisions.filter { $0.recommendation == .observe }.count,
             prepareHandoffCount: decisions.filter { $0.recommendation == .prepareHandoff }.count,
             pendingHandoffCosts: costs.filter { $0.status == .pending }.count,
-            completedHandoffCosts: completed.count,
-            quickCapsuleHandoffs: completed.filter { $0.preparationMethod == .quickCapsule }.count,
-            fullSummaryHandoffs: completed.filter { $0.preparationMethod == .fullSourceSummary }.count,
-            historyInjectionHandoffs: completed.filter { $0.deliveryMethod == .historyInjection }.count,
-            acknowledgementTurnHandoffs: completed.filter { $0.deliveryMethod == .acknowledgementTurn }.count,
+            seededHandoffCosts: costs.filter { $0.status == .seeded }.count,
+            acknowledgedHandoffCosts: costs.filter { $0.status == .acknowledged }.count,
+            continuedHandoffCosts: costs.filter { $0.status == .continued }.count,
+            completedHandoffCosts: legacyCompleted.count,
+            quickCapsuleHandoffs: costs.filter { $0.preparationMethod == .quickCapsule }.count,
+            fullSummaryHandoffs: costs.filter { $0.preparationMethod == .fullSourceSummary }.count,
+            historyInjectionHandoffs: costs.filter { $0.deliveryMethod == .historyInjection }.count,
+            acknowledgementTurnHandoffs: costs.filter { $0.deliveryMethod == .acknowledgementTurn }.count,
             handoffUsage: usage)
     }
 
@@ -848,8 +1066,37 @@ public final class SQLiteStore: @unchecked Sendable {
         return try decoder.decode(TurnRecord.self, from: data(statement, column: 0))
     }
 
+    private func latestTurnUnlocked(
+        sessionID: String,
+        excludingTurnID: String?,
+        startedAtOrAfter: Date
+    ) throws -> TurnRecord? {
+        let statement = try prepare("""
+            SELECT data FROM turns
+            WHERE session_id = ? AND started_at >= ?
+            ORDER BY started_at DESC LIMIT 20
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, to: statement, at: 1)
+        bind(startedAtOrAfter, to: statement, at: 2)
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let turn = try decoder.decode(TurnRecord.self, from: data(statement, column: 0))
+            if turn.turnID != excludingTurnID,
+               !(turn.turnID ?? "").hasPrefix("auto-compact-")
+            {
+                return turn
+            }
+        }
+        return nil
+    }
+
     private func bind(_ value: String, to statement: OpaquePointer?, at index: Int32) {
         sqlite3_bind_text(statement, index, value, -1, sqliteTransient)
+    }
+
+    private func bind(_ value: String?, to statement: OpaquePointer?, at index: Int32) {
+        if let value { bind(value, to: statement, at: index) }
+        else { sqlite3_bind_null(statement, index) }
     }
 
     private func bind(_ value: Data, to statement: OpaquePointer?, at index: Int32) {

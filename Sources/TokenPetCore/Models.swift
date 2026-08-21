@@ -67,6 +67,8 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     public var resetsAt: Date?
     public var creditBalance: String?
     public var limitName: String?
+    public var limitID: String?
+    public var observedAt: Date?
 
     public var remainingPercent: Double { max(0, min(100, 100 - usedPercent)) }
     public var level: QuotaLevel {
@@ -75,7 +77,7 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         return .healthy
     }
 
-    public init(raw: [String: Any]) {
+    public init(raw: [String: Any], observedAt: Date? = nil) {
         let primary = raw["primary"] as? [String: Any] ?? [:]
         usedPercent = max(0, min(100, (primary["used_percent"] as? NSNumber)?.doubleValue ?? 0))
         windowMinutes = max(0, (primary["window_minutes"] as? NSNumber)?.intValue ?? 0)
@@ -87,6 +89,15 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         let credits = raw["credits"] as? [String: Any]
         creditBalance = credits?["balance"] as? String
         limitName = raw["limit_name"] as? String
+        limitID = raw["limit_id"] as? String
+        self.observedAt = observedAt
+    }
+
+    public static func isValid(raw: [String: Any]) -> Bool {
+        guard let primary = raw["primary"] as? [String: Any],
+              primary["used_percent"] is NSNumber
+        else { return false }
+        return true
     }
 }
 
@@ -242,6 +253,10 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
     public var confidence: String
     public var quota: QuotaSnapshot?
     public var lastActivityAt: Date?
+    /// Latest rollout `sub_agent_activity` evidence for this turn. It is
+    /// retained for Hook health diagnostics while the turn remains hidden from
+    /// the user-facing sidebar.
+    public var lastSubagentActivityAt: Date?
 
     public var id: String { "\(sessionID):\(turnID ?? String(ordinal))" }
     public var projectName: String { URL(fileURLWithPath: cwd).lastPathComponent }
@@ -286,6 +301,7 @@ public struct TurnRecord: Codable, Equatable, Identifiable, Sendable {
         self.confidence = "exact"
         self.quota = nil
         self.lastActivityAt = startedAt
+        self.lastSubagentActivityAt = nil
     }
 }
 
@@ -351,10 +367,13 @@ public struct DashboardSnapshot: Sendable {
     }
 
     public var latestQuota: QuotaSnapshot? {
-        (active + recent)
-            .sorted { $0.sortDate > $1.sortDate }
-            .compactMap(\.quota)
-            .first
+        let candidates = (active + recent).compactMap { turn -> (QuotaSnapshot, Date)? in
+            guard let quota = turn.quota else { return nil }
+            return (quota, quota.observedAt ?? turn.sortDate)
+        }
+        let canonical = candidates.filter { $0.0.limitID == "codex" }
+        return (canonical.isEmpty ? candidates : canonical)
+            .max { $0.1 < $1.1 }?.0
     }
 
     public var sessions: [SessionSummary] {
@@ -377,7 +396,10 @@ public struct DashboardSnapshot: Sendable {
                     freshInputAnomaly: freshInputAnomaly,
                     postCompactionRebound: postCompactionRebound,
                     policy: policy)
-            let advice: SessionAdvice = risk == .red ? .startFresh : (risk == .amber ? .watch : .continueCurrent)
+            // Context pressure describes resource state; it is not evidence that
+            // the current coherent task should be migrated. A fresh-task offer
+            // requires the separate task-boundary policy.
+            let advice: SessionAdvice = risk == .green ? .continueCurrent : .watch
             return SessionSummary(
                 sessionID: sessionID,
                 title: title(for: latest),
@@ -540,7 +562,7 @@ public struct DashboardSnapshot: Sendable {
         policy: HealthPolicy
     ) -> String {
         let pressure = latest.contextPressure.map { "Context \(Int($0 * 100))%" }
-        if postCompactionRebound { return "Context rose quickly after a recent compaction. Start fresh before resuming." }
+        if postCompactionRebound { return "Context rose quickly after a recent compaction. Keep observing task continuity." }
         if (latest.contextPressure ?? 0) >= policy.redContext { return "\(pressure ?? "Context") reached your personalized high-pressure threshold of \(Int(policy.redContext * 100))%." }
         if recentCompactions > 0 { return "This session compacted recently. Watch whether context rebounds quickly." }
         if (latest.contextPressure ?? 0) >= policy.amberContext { return "\(pressure ?? "Context") reached your personalized watch threshold of \(Int(policy.amberContext * 100))%." }

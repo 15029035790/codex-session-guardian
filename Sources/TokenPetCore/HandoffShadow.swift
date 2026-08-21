@@ -164,6 +164,17 @@ public enum HandoffShadowPolicy {
 
 public enum HandoffCostStatus: String, Codable, Sendable {
     case pending
+    /// The summary was accepted by `thread/inject_items`, but the destination
+    /// task has not exposed it through `thread/read` and has no real turn yet.
+    case seeded
+    /// The destination exposed the marker through `thread/read`, or completed
+    /// the compatibility acknowledgement turn.
+    case acknowledged
+    /// A later, real destination turn started. This is the first state that
+    /// proves the new task was actually used for continuation.
+    case continued
+    /// Kept only so existing ledger rows remain decodable. New handoffs never
+    /// write this state because delivery and continuation are distinct facts.
     case complete
 }
 
@@ -200,6 +211,7 @@ public struct HandoffCostRecord: Codable, Equatable, Identifiable, Sendable {
         destinationAcknowledgementTurnID: String?,
         preparationMethod: HandoffPreparationMethod,
         deliveryMethod: HandoffDeliveryMethod = .acknowledgementTurn,
+        status: HandoffCostStatus? = nil,
         startedAt: Date,
         payload: String
     ) {
@@ -215,10 +227,8 @@ public struct HandoffCostRecord: Codable, Equatable, Identifiable, Sendable {
         self.payloadCharacters = payload.count
         self.payloadUTF8Bytes = payload.utf8.count
         self.sourceUsage = sourceSummaryTurnID == nil ? TokenUsage() : nil
-        self.destinationUsage = deliveryMethod == .historyInjection ? TokenUsage() : nil
-        let isComplete = self.sourceUsage != nil && self.destinationUsage != nil
-        self.completedAt = isComplete ? startedAt : nil
-        self.status = isComplete ? .complete : .pending
+        self.destinationUsage = destinationAcknowledgementTurnID == nil ? TokenUsage() : nil
+        self.status = status ?? (deliveryMethod == .historyInjection ? .seeded : .pending)
     }
 
     public var totalUsage: TokenUsage {
@@ -270,6 +280,9 @@ public struct HandoffShadowTelemetrySummary: Equatable, Sendable {
     public var observeCount: Int
     public var prepareHandoffCount: Int
     public var pendingHandoffCosts: Int
+    public var seededHandoffCosts: Int
+    public var acknowledgedHandoffCosts: Int
+    public var continuedHandoffCosts: Int
     public var completedHandoffCosts: Int
     public var quickCapsuleHandoffs: Int
     public var fullSummaryHandoffs: Int

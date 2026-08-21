@@ -121,17 +121,27 @@ public final class SessionScanner: @unchecked Sendable {
         let metadata = threadMetadata()
         let archived = metadata.archived.union(try store.archivedSessionIDs())
         let excluded = archived.union(metadata.internalSubagents)
+        let sidebarSessionIDs = Set(metadata.rolloutPaths.keys)
+        let sidebarTurns = try store.turns(sessionIDs: sidebarSessionIDs)
         let active = try store.turns(status: .running, limit: 100)
             .filter {
                 $0.isSubagent != true &&
                     !excluded.contains($0.sessionID) &&
-                    isSidebarVisible($0, desktop: metadata.desktop)
+                    isSnapshotVisible(
+                        $0,
+                        sidebarSessionIDs: sidebarSessionIDs,
+                        desktopStateAvailable: metadata.desktop != nil)
             }
-        let recent = try store.turns(limit: limit)
+        var recentByID = Dictionary(uniqueKeysWithValues: sidebarTurns.map { ($0.id, $0) })
+        for turn in try store.turns(limit: limit) { recentByID[turn.id] = turn }
+        let recent = recentByID.values
             .filter {
                 $0.isSubagent != true &&
                     !excluded.contains($0.sessionID) &&
-                    isSidebarVisible($0, desktop: metadata.desktop)
+                    isSnapshotVisible(
+                        $0,
+                        sidebarSessionIDs: sidebarSessionIDs,
+                        desktopStateAvailable: metadata.desktop != nil)
             }
         return DashboardSnapshot(
             active: active,
@@ -154,6 +164,89 @@ public final class SessionScanner: @unchecked Sendable {
         threadMetadata().rolloutPaths.reduce(into: [:]) { result, pair in
             if sessionIDs.contains(pair.key) { result[pair.key] = pair.value.path }
         }
+    }
+
+    /// Full-history rollout evidence used only for lifecycle diagnostics. This
+    /// intentionally reads all indexed turns, including hidden subagents; the
+    /// user-facing `snapshot` continues to filter them.
+    public func subagentActivityEvidence(limit: Int = 10_000) throws -> (
+        latestAt: Date?,
+        count: Int
+    ) {
+        let turns = try store.turns(limit: max(1, limit))
+        let latestAt = turns.compactMap(\.lastSubagentActivityAt).max()
+        // A turn can be persisted once before Codex supplies its turn id and
+        // again after that id arrives. Count the lifecycle evidence itself,
+        // not both SQLite identities for the same event.
+        let activityKeys = Set(turns.compactMap { turn -> String? in
+            guard let observedAt = turn.lastSubagentActivityAt else { return nil }
+            return "\(turn.sessionID):\(observedAt.timeIntervalSinceReferenceDate)"
+        })
+        let count = activityKeys.count
+        return (latestAt, count)
+    }
+
+    /// Derive lifecycle Hook health from the local configuration, the
+    /// independent observation ledger, and rollout activity. The caller may
+    /// pass the low-frequency `hooks/list` result when available; the local
+    /// files remain the fallback so a temporary app-server outage does not
+    /// hide a known untrusted state.
+    public func subagentHookHealth(
+        appServerHooks: [CodexHookMetadata] = [],
+        now: Date = Date()
+    ) throws -> SubagentHookHealthSnapshot {
+        let configurations = SubagentHookConfigurationInspector.inspect(
+            hooksFile: codexHome.appendingPathComponent("hooks.json"),
+            configFile: codexHome.appendingPathComponent("config.toml"),
+            appServerHooks: appServerHooks,
+            now: now)
+        let observations = try store.subagentHookObservations(limit: 5_000)
+        let latestStart = observations.first(where: {
+            $0.event == .start && $0.outcome == .parsed
+        })?.observedAt
+        let latestStop = observations.first(where: {
+            $0.event == .stop && $0.outcome == .parsed
+        })?.observedAt
+        let activity = try subagentActivityEvidence()
+        let startConfiguration = configurations.first(where: { $0.event == .start }) ??
+            SubagentHookConfiguration(
+                event: .start,
+                installed: false,
+                enabled: false,
+                trusted: false,
+                trustStatus: nil,
+                command: nil,
+                currentHash: nil,
+                configSectionFound: false,
+                trustConfiguredAt: nil,
+                inspectedAt: now)
+        let stopConfiguration = configurations.first(where: { $0.event == .stop }) ??
+            SubagentHookConfiguration(
+                event: .stop,
+                installed: false,
+                enabled: false,
+                trusted: false,
+                trustStatus: nil,
+                command: nil,
+                currentHash: nil,
+                configSectionFound: false,
+                trustConfiguredAt: nil,
+                inspectedAt: now)
+        let start = SubagentHookHealth.evaluate(
+            configuration: startConfiguration,
+            latestObservationAt: latestStart,
+            latestSubagentActivityAt: activity.latestAt,
+            now: now)
+        let stop = SubagentHookHealth.evaluate(
+            configuration: stopConfiguration,
+            latestObservationAt: latestStop,
+            latestSubagentActivityAt: activity.latestAt,
+            now: now)
+        return SubagentHookHealthSnapshot(
+            start: start,
+            stop: stop,
+            subagentActivityCount: activity.count,
+            observedAt: now)
     }
 
     public func recordShadowCompletions(
@@ -370,11 +463,19 @@ public final class SessionScanner: @unchecked Sendable {
                   let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let payload = object["payload"] as? [String: Any],
                   payload["type"] as? String == "token_count",
-                  let raw = payload["rate_limits"] as? [String: Any]
+                  let raw = payload["rate_limits"] as? [String: Any],
+                  QuotaSnapshot.isValid(raw: raw)
             else { continue }
-            return QuotaSnapshot(raw: raw)
+            let observedAt = (object["timestamp"] as? String).flatMap(Self.parseTimestamp)
+            return QuotaSnapshot(raw: raw, observedAt: observedAt)
         }
         return nil
+    }
+
+    private static func parseTimestamp(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
     private func sessionTitles(stateTitles: [String: String]) -> [String: String] {
@@ -396,7 +497,6 @@ public final class SessionScanner: @unchecked Sendable {
 
     private struct DesktopSidebarState {
         var visibleThreadIDs: Set<String>
-        var assignedThreadIDs: Set<String>
         var projectRoots: [String]
     }
 
@@ -413,10 +513,8 @@ public final class SessionScanner: @unchecked Sendable {
         }
         var visible = Set(object["projectless-thread-ids"] as? [String] ?? [])
         visible.formUnion(object["pinned-thread-ids"] as? [String] ?? [])
-        var assigned = Set<String>()
         if let assignments = object["thread-project-assignments"] as? [String: Any] {
             for (threadID, raw) in assignments {
-                assigned.insert(threadID)
                 guard let assignment = raw as? [String: Any],
                       assignment["projectKind"] as? String == "local",
                       let projectID = assignment["projectId"] as? String,
@@ -425,14 +523,18 @@ public final class SessionScanner: @unchecked Sendable {
                 visible.insert(threadID)
             }
         }
-        return DesktopSidebarState(
-            visibleThreadIDs: visible,
-            assignedThreadIDs: assigned,
-            projectRoots: roots)
+        return DesktopSidebarState(visibleThreadIDs: visible, projectRoots: roots)
     }
 
-    private func isSidebarVisible(_ turn: TurnRecord, desktop: DesktopSidebarState?) -> Bool {
-        if isDesktopSidebarThread(threadID: turn.sessionID, cwd: turn.cwd, desktop: desktop) { return true }
+    private func isSnapshotVisible(
+        _ turn: TurnRecord,
+        sidebarSessionIDs: Set<String>,
+        desktopStateAvailable: Bool
+    ) -> Bool {
+        // Without Codex Desktop's state file there is no sidebar fact source;
+        // preserve the scanner's historical local-only behavior.
+        guard desktopStateAvailable else { return true }
+        if sidebarSessionIDs.contains(turn.sessionID) { return true }
         // Desktop can persist a new assignment just after the rollout starts.
         // Preserve only a genuinely fresh running task during that short lag.
         guard turn.status == .running, let activity = turn.lastActivityAt else { return false }
@@ -442,19 +544,41 @@ public final class SessionScanner: @unchecked Sendable {
     private func isDesktopSidebarThread(
         threadID: String,
         cwd: String,
+        hasPreview: Bool,
         desktop: DesktopSidebarState?
     ) -> Bool {
         guard let desktop else { return true }
         if desktop.visibleThreadIDs.contains(threadID) { return true }
-        // An explicit assignment to a project that no longer exists is how
-        // Desktop represents an imported task that has fallen out of the sidebar.
-        if desktop.assignedThreadIDs.contains(threadID) { return false }
+        // Desktop's normal project view also groups top-level threads by their
+        // CWD. `preview` is the database's visible-thread marker; without it,
+        // old rollouts can retain a matching CWD after leaving the sidebar.
+        if hasPreview, belongsToDesktopProject(cwd, projectRoots: desktop.projectRoots) { return true }
+        // Codex also shows normal continuation tasks that run inside its
+        // managed worktrees. They have no database preview, so recognize only
+        // a worktree whose repository name maps back to a visible project.
+        return isManagedWorktree(ofVisibleProject: cwd, projectRoots: desktop.projectRoots)
+    }
+
+    private func belongsToDesktopProject(_ cwd: String, projectRoots: [String]) -> Bool {
         let standardizedCWD = URL(fileURLWithPath: cwd).standardizedFileURL.path
-        if desktop.projectRoots.contains(where: { root in
+        return projectRoots.contains { root in
             let standardizedRoot = URL(fileURLWithPath: root).standardizedFileURL.path
             return standardizedCWD == standardizedRoot || standardizedCWD.hasPrefix(standardizedRoot + "/")
-        }) { return true }
-        return false
+        }
+    }
+
+    private func isManagedWorktree(ofVisibleProject cwd: String, projectRoots: [String]) -> Bool {
+        let url = URL(fileURLWithPath: cwd).standardizedFileURL
+        let components = url.pathComponents
+        guard let worktreesIndex = components.lastIndex(of: "worktrees"),
+              components.indices.contains(worktreesIndex - 1),
+              components[worktreesIndex - 1] == ".codex",
+              components.count > worktreesIndex + 2
+        else { return false }
+        let repositoryName = components[worktreesIndex + 2]
+        return projectRoots.contains {
+            URL(fileURLWithPath: $0).standardizedFileURL.lastPathComponent == repositoryName
+        }
     }
 
     private static func displayTitle(_ rawTitle: String) -> String {
@@ -498,14 +622,17 @@ public final class SessionScanner: @unchecked Sendable {
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(
-            database,
-            "SELECT id, title, archived, source, rollout_path, thread_source, cwd FROM threads",
-            -1,
-            &statement,
-            nil) == SQLITE_OK,
-              let statement
-        else { return ([:], [], [], [:], desktop) }
+        let previewSQL = "SELECT id, title, archived, source, rollout_path, thread_source, cwd, preview FROM threads"
+        let legacySQL = "SELECT id, title, archived, source, rollout_path, thread_source, cwd FROM threads"
+        let supportsPreview = sqlite3_prepare_v2(database, previewSQL, -1, &statement, nil) == SQLITE_OK
+        if !supportsPreview {
+            if statement != nil { sqlite3_finalize(statement) }
+            statement = nil
+            guard sqlite3_prepare_v2(database, legacySQL, -1, &statement, nil) == SQLITE_OK else {
+                return ([:], [], [], [:], desktop)
+            }
+        }
+        guard let statement else { return ([:], [], [], [:], desktop) }
         defer { sqlite3_finalize(statement) }
 
         var titles: [String: String] = [:]
@@ -515,14 +642,13 @@ public final class SessionScanner: @unchecked Sendable {
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let idPointer = sqlite3_column_text(statement, 0) else { continue }
             let id = String(cString: idPointer)
-            if let titlePointer = sqlite3_column_text(statement, 1) {
-                let title = String(cString: titlePointer).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !title.isEmpty { titles[id] = title }
-            }
+            let title = sqlite3_column_text(statement, 1)
+                .map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            if !title.isEmpty { titles[id] = title }
             if sqlite3_column_int(statement, 2) != 0 { archived.insert(id) }
             if let sourcePointer = sqlite3_column_text(statement, 3) {
                 let source = String(cString: sourcePointer)
-                if source == "subagent" {
+                if source == "subagent" || source == "exec" {
                     internalSubagents.insert(id)
                 } else if let data = source.data(using: .utf8),
                           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -531,10 +657,23 @@ public final class SessionScanner: @unchecked Sendable {
                     internalSubagents.insert(id)
                 }
             }
+            let threadSource = sqlite3_column_text(statement, 5).map { String(cString: $0) } ?? ""
+            if threadSource.caseInsensitiveCompare("subagent") == .orderedSame,
+               title.hasPrefix("<codex_delegation>") {
+                // Keep delegated tasks when Desktop presents them as a normal
+                // task; omit only its implementation wrapper entry.
+                internalSubagents.insert(id)
+            }
             let cwd = sqlite3_column_text(statement, 6).map { String(cString: $0) } ?? ""
+            let hasPreview = supportsPreview && (sqlite3_column_text(statement, 7)
+                .map { !String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false)
             if !archived.contains(id), !internalSubagents.contains(id),
                titles[id] != nil,
-               isDesktopSidebarThread(threadID: id, cwd: cwd, desktop: desktop),
+               isDesktopSidebarThread(
+                threadID: id,
+                cwd: cwd,
+                hasPreview: hasPreview,
+                desktop: desktop),
                let pathPointer = sqlite3_column_text(statement, 4)
             {
                 let path = String(cString: pathPointer)

@@ -51,10 +51,61 @@ public struct RoutingSelection: Codable, Equatable, Sendable {
     }
 }
 
+public struct CodexRolloutPreflightFacts: Equatable, Sendable {
+    public var isTopLevelUserTask: Bool
+    public var selection: RoutingSelection?
+
+    public init(isTopLevelUserTask: Bool, selection: RoutingSelection?) {
+        self.isTopLevelUserTask = isTopLevelUserTask
+        self.selection = selection
+    }
+}
+
 public enum RoutingPreflightClassifier: String, Codable, Equatable, Sendable {
     case localRule
     case boundedModel
     case failOpen
+}
+
+public enum RoutingHookDiagnosticOutcome: String, Codable, Equatable, Sendable {
+    case allowed
+    case blocked
+    case bypassed
+    case filtered
+    case failed
+}
+
+/// One privacy-safe terminal result for a UserPromptSubmit invocation. It never
+/// stores the prompt, cwd, transcript path, command, or model output.
+public struct RoutingHookDiagnostic: Codable, Equatable, Sendable {
+    public var id: String
+    public var observedAt: Date
+    public var sessionHash: String?
+    public var outcome: RoutingHookDiagnosticOutcome
+    public var reasonCode: String
+    public var inputKeys: [String]
+    public var requestedSelection: RoutingSelection?
+    public var actualSelection: RoutingSelection?
+
+    public init(
+        id: String = UUID().uuidString,
+        observedAt: Date = Date(),
+        sessionID: String?,
+        outcome: RoutingHookDiagnosticOutcome,
+        reasonCode: String,
+        inputKeys: [String] = [],
+        requestedSelection: RoutingSelection? = nil,
+        actualSelection: RoutingSelection? = nil
+    ) {
+        self.id = id
+        self.observedAt = observedAt
+        self.sessionHash = sessionID.map(RoutingPreflightObservation.opaqueHash)
+        self.outcome = outcome
+        self.reasonCode = reasonCode
+        self.inputKeys = inputKeys.sorted()
+        self.requestedSelection = requestedSelection
+        self.actualSelection = actualSelection
+    }
 }
 
 public struct RoutingPreflightDecision: Codable, Equatable, Sendable {
@@ -160,6 +211,14 @@ public struct RoutingPreflightObservation: Codable, Equatable, Sendable {
 
     public func belongs(to sessionID: String) -> Bool {
         sessionHash == Self.opaqueHash(sessionID)
+    }
+
+    /// A later turn means the paused prompt was replayed or the user moved on.
+    /// Compare starts, not completions: the originally blocked turn itself
+    /// completes after the hook observation and must keep the card visible.
+    public func isSuperseded(by turn: TurnRecord?) -> Bool {
+        guard let startedAt = turn?.startedAt else { return false }
+        return startedAt > observedAt
     }
 
     public static func opaqueHash(_ value: String) -> String {
@@ -475,7 +534,7 @@ public enum CodexThreadSelectionReader {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(
             database,
-            "SELECT source, thread_source, archived, preview FROM threads WHERE id = ? LIMIT 1",
+            "SELECT source, thread_source, archived FROM threads WHERE id = ? LIMIT 1",
             -1,
             &statement,
             nil) == SQLITE_OK,
@@ -487,47 +546,125 @@ public enum CodexThreadSelectionReader {
         let source = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
         let threadSource = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
         let archived = sqlite3_column_int(statement, 2) != 0
-        let preview = sqlite3_column_text(statement, 3).map { String(cString: $0) } ?? ""
-        return !archived && !preview.isEmpty &&
+        return !archived &&
             threadSource.caseInsensitiveCompare("subagent") != .orderedSame &&
             !source.localizedCaseInsensitiveContains("\"subagent\"")
+    }
+}
+
+public enum CodexRolloutPreflightReader {
+    public static let maximumHeadBytes = 512 * 1_024
+    public static let maximumTailBytes: UInt64 = 512 * 1_024
+
+    /// Reads only routing identity and the latest turn configuration. Prompt,
+    /// instructions, tool content, and model output are never returned.
+    public static func read(sessionID: String, transcriptPath: String) -> CodexRolloutPreflightFacts? {
+        let url = URL(fileURLWithPath: transcriptPath)
+        guard let headHandle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? headHandle.close() }
+        guard let head = try? headHandle.read(upToCount: maximumHeadBytes),
+              let firstLine = head.split(separator: 0x0A, omittingEmptySubsequences: true).first,
+              let firstObject = try? JSONSerialization.jsonObject(with: firstLine) as? [String: Any],
+              firstObject["type"] as? String == "session_meta",
+              let metadata = firstObject["payload"] as? [String: Any]
+        else { return nil }
+        let metadataSessionID = (metadata["session_id"] as? String) ?? (metadata["id"] as? String)
+        guard metadataSessionID == sessionID else { return nil }
+        let threadSource = (metadata["thread_source"] as? String) ?? ""
+        let source = (metadata["source"] as? String) ?? ""
+        let isTopLevel = threadSource.caseInsensitiveCompare("user") == .orderedSame &&
+            !source.localizedCaseInsensitiveContains("subagent")
+
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: transcriptPath),
+              let size = (attributes[.size] as? NSNumber)?.uint64Value,
+              let tailHandle = try? FileHandle(forReadingFrom: url)
+        else {
+            return CodexRolloutPreflightFacts(isTopLevelUserTask: isTopLevel, selection: nil)
+        }
+        defer { try? tailHandle.close() }
+        let start = size > maximumTailBytes ? size - maximumTailBytes : 0
+        try? tailHandle.seek(toOffset: start)
+        guard var tail = try? tailHandle.readToEnd() else {
+            return CodexRolloutPreflightFacts(isTopLevelUserTask: isTopLevel, selection: nil)
+        }
+        if start > 0, let newline = tail.firstIndex(of: 0x0A) {
+            tail = Data(tail.suffix(from: tail.index(after: newline)))
+        }
+        var selection: RoutingSelection?
+        for line in tail.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  object["type"] as? String == "turn_context",
+                  let payload = object["payload"] as? [String: Any],
+                  let model = payload["model"] as? String,
+                  let effort = payload["effort"] as? String,
+                  !model.isEmpty,
+                  !effort.isEmpty
+            else { continue }
+            selection = RoutingSelection(model: model, reasoningEffort: effort)
+        }
+        return CodexRolloutPreflightFacts(isTopLevelUserTask: isTopLevel, selection: selection)
     }
 }
 
 public enum RoutingReplaySafety {
     public static let maximumTailBytes: UInt64 = 512 * 1_024
 
-    /// Returns nil when the private rollout cannot be read or its bounded tail
-    /// does not establish a lifecycle state. Callers must fail closed and must
-    /// not offer replay in that case.
-    public static func isTurnActive(transcriptPath: String) -> Bool? {
+    public enum LifecycleState: String, Equatable, Sendable {
+        case notStarted
+        case active
+        case idle
+        case unknown
+    }
+
+    public static func lifecycleState(transcriptPath: String) -> LifecycleState {
         let url = URL(fileURLWithPath: transcriptPath)
         guard let handle = try? FileHandle(forReadingFrom: url),
               let attributes = try? FileManager.default.attributesOfItem(atPath: transcriptPath),
               let size = (attributes[.size] as? NSNumber)?.uint64Value
-        else { return nil }
+        else { return .unknown }
         defer { try? handle.close() }
         let start = size > maximumTailBytes ? size - maximumTailBytes : 0
         try? handle.seek(toOffset: start)
-        guard var data = try? handle.readToEnd() else { return nil }
+        guard var data = try? handle.readToEnd() else { return .unknown }
         if start > 0, let newline = data.firstIndex(of: 0x0A) {
             data = Data(data.suffix(from: data.index(after: newline)))
         }
-        var active: Bool?
+        var sawSessionMeta = false
+        var state: LifecycleState?
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
-            guard line.range(of: Data(#""type":"event_msg""#.utf8)) != nil,
-                  let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                  object["type"] as? String == "event_msg",
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = object["type"] as? String
+            else { continue }
+            if type == "session_meta" {
+                sawSessionMeta = true
+                continue
+            }
+            guard type == "event_msg",
                   let payload = object["payload"] as? [String: Any],
                   let event = payload["type"] as? String
             else { continue }
             if event == "task_started" {
-                active = true
+                state = .active
             } else if ["task_complete", "task_failed", "turn_failed", "turn_aborted"].contains(event) {
-                active = false
+                state = .idle
             }
         }
-        return active
+        if let state { return state }
+        // A fresh top-level task has a valid session_meta line before its first
+        // provider call, but no lifecycle event yet. That is safe to block and
+        // replay; a truncated/corrupt tail without session metadata is not.
+        return sawSessionMeta && start == 0 ? .notStarted : .unknown
+    }
+
+    /// Returns nil when the private rollout cannot be read or its bounded tail
+    /// does not establish a lifecycle state. Callers must fail closed and must
+    /// not offer replay in that case.
+    public static func isTurnActive(transcriptPath: String) -> Bool? {
+        switch lifecycleState(transcriptPath: transcriptPath) {
+        case .active: return true
+        case .idle, .notStarted: return false
+        case .unknown: return nil
+        }
     }
 
     public static func canReplay(sessionID: String, databasePath: String) -> Bool {

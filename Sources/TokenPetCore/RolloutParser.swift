@@ -1,7 +1,40 @@
 import Foundation
 
+/// A spawn request is kept in memory/on the rollout cursor until Codex emits
+/// positive lifecycle evidence. A `spawn_agent` function call alone is not a
+/// dispatch: the tool can be rejected before a child task exists.
+public struct PendingAgentDispatch: Codable, Equatable, Sendable {
+    public var callID: String
+    public var taskName: String
+    public var agentType: String
+    public var forkTurns: String?
+    public var model: String?
+    public var reasoningEffort: String?
+    public var occurredAt: Date
+
+    public init(
+        callID: String,
+        taskName: String,
+        agentType: String,
+        forkTurns: String?,
+        model: String?,
+        reasoningEffort: String?,
+        occurredAt: Date
+    ) {
+        self.callID = callID
+        self.taskName = taskName
+        self.agentType = agentType
+        self.forkTurns = forkTurns
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.occurredAt = occurredAt
+    }
+}
+
 public struct RolloutState: Codable, Equatable, Sendable {
-    public static let currentClassificationVersion = 10
+    // Bump when dispatch confirmation semantics change so existing cursors
+    // are replayed and stale function-call-only records disappear.
+    public static let currentClassificationVersion = 12
 
     public var sessionID: String?
     public var cwd = ""
@@ -18,6 +51,7 @@ public struct RolloutState: Codable, Equatable, Sendable {
     public var recentFingerprints: [String] = []
     public var latestQuota: QuotaSnapshot?
     public var pendingVerificationCalls: [String: Bool]?
+    public var pendingAgentDispatches: [String: PendingAgentDispatch]?
     var executionWasteTracker: ExecutionWasteTracker?
 
     public init() {}
@@ -90,12 +124,13 @@ public struct RolloutState: Codable, Equatable, Sendable {
         }
         if type == "response_item", eventType == "function_call" || eventType == "custom_tool_call" {
             ensureTurn(timestamp: timestamp, turnID: payload["turn_id"] as? String)
-            recordAgentDispatchIfNeeded(payload, timestamp: timestamp)
+            recordPendingAgentDispatchIfNeeded(payload, timestamp: timestamp)
             recordTool(named: payload["name"] as? String ?? "", payload: payload)
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
         }
         if type == "response_item", eventType == "function_call_output" || eventType == "custom_tool_call_output" {
+            recordAgentDispatchOutputIfNeeded(payload)
             _ = recordWasteOutput(
                 callID: payload["call_id"] as? String,
                 raw: payload["output"])
@@ -140,7 +175,9 @@ public struct RolloutState: Codable, Equatable, Sendable {
         }
         if type == "event_msg", eventType == "sub_agent_activity" {
             ensureTurn(timestamp: timestamp, turnID: payload["turn_id"] as? String)
+            recordStartedAgentActivityIfNeeded(payload, timestamp: timestamp)
             mutateProfile { $0.agentActions += 1 }
+            if let timestamp { active?.lastSubagentActivityAt = timestamp }
             if let timestamp { active?.lastActivityAt = timestamp }
             return active
         }
@@ -183,8 +220,10 @@ public struct RolloutState: Codable, Equatable, Sendable {
             return active
         }
         guard type == "event_msg", eventType == "token_count" else { return nil }
-        if let rawQuota = payload["rate_limits"] as? [String: Any] {
-            latestQuota = QuotaSnapshot(raw: rawQuota)
+        if let rawQuota = payload["rate_limits"] as? [String: Any],
+           QuotaSnapshot.isValid(raw: rawQuota)
+        {
+            latestQuota = QuotaSnapshot(raw: rawQuota, observedAt: timestamp)
             active?.quota = latestQuota
         }
         guard
@@ -253,24 +292,122 @@ public struct RolloutState: Codable, Equatable, Sendable {
         active?.agentPath = agentPath
     }
 
-    private mutating func recordAgentDispatchIfNeeded(_ payload: [String: Any], timestamp: Date?) {
+    private mutating func recordPendingAgentDispatchIfNeeded(_ payload: [String: Any], timestamp: Date?) {
         guard (payload["name"] as? String) == "spawn_agent",
-              let raw = payload["arguments"] as? String,
-              let data = raw.data(using: .utf8),
-              let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let taskName = arguments["task_name"] as? String,
-              !taskName.isEmpty
+              let callID = Self.nonEmpty(payload["call_id"] as? String ?? payload["id"] as? String)
         else { return }
-        var records = active?.agentDispatches ?? []
-        let record = AgentDispatchRecord(
-            taskName: taskName,
-            agentType: arguments["agent_type"] as? String ?? "default",
-            forkTurns: arguments["fork_turns"] as? String ?? "all",
+        let arguments: [String: Any]
+        if let raw = payload["arguments"] as? String,
+           let data = raw.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            arguments = object
+        } else if let object = payload["arguments"] as? [String: Any] {
+            arguments = object
+        } else {
+            return
+        }
+        guard
+              let taskName = arguments["task_name"] as? String,
+              let normalizedTaskName = Self.nonEmpty(taskName)
+        else { return }
+
+        var pending = pendingAgentDispatches ?? [:]
+        pending[callID] = PendingAgentDispatch(
+            callID: callID,
+            taskName: normalizedTaskName,
+            agentType: Self.nonEmpty(arguments["agent_type"] as? String) ?? "unknown",
+            // A missing field remains unknown. In particular, do not turn an
+            // omitted field into the historical default `all`.
+            forkTurns: Self.nonEmpty(arguments["fork_turns"] as? String),
             model: arguments["model"] as? String,
             reasoningEffort: arguments["reasoning_effort"] as? String,
             occurredAt: timestamp ?? active?.lastActivityAt ?? Date())
-        if !records.contains(record) { records.append(record) }
+        pendingAgentDispatches = pending
+    }
+
+    private mutating func recordAgentDispatchOutputIfNeeded(_ payload: [String: Any]) {
+        guard let callID = Self.nonEmpty(payload["call_id"] as? String),
+              let pending = pendingAgentDispatches?[callID]
+        else { return }
+        switch Self.spawnOutputStatus(payload["output"]) {
+        case let .success(path):
+            confirmAgentDispatch(
+                pending,
+                agentThreadID: nil,
+                agentPath: path,
+                taskName: Self.taskName(fromAgentPath: path) ?? pending.taskName)
+        case .failure:
+            // A rejected/failed spawn is deliberately forgotten. It must not
+            // become an audit dispatch merely because the call was attempted.
+            pendingAgentDispatches?.removeValue(forKey: callID)
+        case .unknown:
+            break
+        }
+    }
+
+    private mutating func recordStartedAgentActivityIfNeeded(
+        _ payload: [String: Any],
+        timestamp: Date?
+    ) {
+        guard (payload["kind"] as? String)?.lowercased() == "started",
+              let callID = Self.nonEmpty(payload["event_id"] as? String)
+        else { return }
+
+        let agentThreadID = Self.nonEmpty(payload["agent_thread_id"] as? String)
+        let agentPath = Self.nonEmpty(payload["agent_path"] as? String)
+        if let pending = pendingAgentDispatches?[callID] {
+            confirmAgentDispatch(
+                pending,
+                agentThreadID: agentThreadID,
+                agentPath: agentPath,
+                taskName: Self.taskName(fromAgentPath: agentPath) ?? pending.taskName)
+            return
+        }
+
+        // A cursor may begin after the original function call when an old
+        // rollout is incrementally tailed. The started lifecycle event is
+        // still positive evidence, so retain a conservative record with
+        // unknown request metadata instead of inventing `fork_turns`.
+        let fallbackTaskName = Self.taskName(fromAgentPath: agentPath)
+        guard let fallbackTaskName else { return }
+        let fallback = PendingAgentDispatch(
+            callID: callID,
+            taskName: fallbackTaskName,
+            agentType: "unknown",
+            forkTurns: nil,
+            model: nil,
+            reasoningEffort: nil,
+            occurredAt: timestamp ?? active?.lastActivityAt ?? Date())
+        confirmAgentDispatch(
+            fallback,
+            agentThreadID: agentThreadID,
+            agentPath: agentPath,
+            taskName: fallbackTaskName)
+    }
+
+    private mutating func confirmAgentDispatch(
+        _ pending: PendingAgentDispatch,
+        agentThreadID: String?,
+        agentPath: String?,
+        taskName: String
+    ) {
+        var records = active?.agentDispatches ?? []
+        let record = AgentDispatchRecord(
+            taskName: taskName,
+            agentType: pending.agentType,
+            forkTurns: pending.forkTurns,
+            model: pending.model,
+            reasoningEffort: pending.reasoningEffort,
+            occurredAt: pending.occurredAt,
+            callID: pending.callID,
+            agentThreadID: agentThreadID,
+            agentPath: agentPath)
+        if !records.contains(where: { $0.callID == record.callID || $0 == record }) {
+            records.append(record)
+        }
         active?.agentDispatches = records
+        pendingAgentDispatches?.removeValue(forKey: pending.callID)
     }
 
     private mutating func recordTool(named rawName: String, payload: [String: Any]) {
@@ -386,6 +523,58 @@ public struct RolloutState: Codable, Equatable, Sendable {
             return nil
         }
         return value
+    }
+
+    private static func taskName(fromAgentPath path: String?) -> String? {
+        guard let path = nonEmpty(path) else { return nil }
+        return path.split(separator: "/").last.map(String.init)
+    }
+
+    private enum SpawnOutputStatus {
+        case success(String?)
+        case failure
+        case unknown
+    }
+
+    private static func spawnOutputStatus(_ raw: Any?) -> SpawnOutputStatus {
+        let output: String
+        if let text = raw as? String {
+            output = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let blocks = raw as? [[String: Any]] {
+            output = blocks.compactMap { $0["text"] as? String }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            return .unknown
+        }
+        guard !output.isEmpty else { return .unknown }
+
+        if let data = output.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            if object["error"] != nil || object["failed"] as? Bool == true ||
+                object["timed_out"] as? Bool == true || object["success"] as? Bool == false
+            {
+                return .failure
+            }
+            if let path = nonEmpty(object["task_name"] as? String)
+                ?? nonEmpty(object["agent_path"] as? String)
+            {
+                return .success(path)
+            }
+        }
+
+        if output.hasPrefix("/"), !output.contains(where: { $0.isWhitespace }) {
+            return .success(output)
+        }
+
+        let normalized = output.lowercased()
+        if ["unsupported", "rejected", "failed", "error", "timed out", "timeout", "cancelled", "canceled"]
+            .contains(where: normalized.contains)
+        {
+            return .failure
+        }
+        return .unknown
     }
 
     private static func date(_ value: String?) -> Date? {

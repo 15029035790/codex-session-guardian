@@ -55,7 +55,34 @@ public enum FloatingPetGeometry {
                 max(visibleFrame.minY, visibleFrame.maxY - petSize.height)))
     }
 
+    /// Selects the display from the mascot footprint, never from an expanded
+    /// card whose leading edge may cross onto another display.
+    public static func visibleFrame(
+        forPetAnchor anchor: CGPoint,
+        petSize: CGSize,
+        screenVisibleFrames: [CGRect]
+    ) -> CGRect? {
+        let petFrame = CGRect(
+            x: anchor.x - petSize.width,
+            y: anchor.y,
+            width: petSize.width,
+            height: petSize.height)
+        let petCenter = CGPoint(x: petFrame.midX, y: petFrame.midY)
+        if let containingFrame = screenVisibleFrames.first(where: { $0.contains(petCenter) }) {
+            return containingFrame
+        }
+        return screenVisibleFrames.max { first, second in
+            intersectionArea(first, petFrame) < intersectionArea(second, petFrame)
+        }
+    }
+
     public static func panelOrigin(forPetAnchor anchor: CGPoint, panelSize: CGSize) -> CGPoint {
         CGPoint(x: anchor.x - panelSize.width, y: anchor.y)
+    }
+
+    private static func intersectionArea(_ first: CGRect, _ second: CGRect) -> CGFloat {
+        let intersection = first.intersection(second)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
     }
 }

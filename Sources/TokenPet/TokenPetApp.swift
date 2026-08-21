@@ -5,7 +5,7 @@ import SwiftUI
 import TokenPetCore
 
 private enum AppVersion {
-    static let label = "v0.3.0"
+    static let label = "v0.3.9"
     static let displayName = "Codex Session Guardian"
 }
 
@@ -240,28 +240,23 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
 final class DashboardModel: ObservableObject {
     @Published var snapshot = DashboardSnapshot(active: [], recent: [], indexedFiles: 0, updatedAt: Date())
     @Published var resumeWarning: SessionSummary?
-    @Published var migratingSessionID: String?
-    @Published var migrationProgress: String?
-    @Published private(set) var migrationCompletionTick = 0
     @Published var isIndexing = true
     @Published private(set) var isRefreshing = false
     @Published private(set) var isManualRefreshing = false
     @Published private(set) var manualRefreshCompletionTick = 0
     @Published private(set) var liveActivities: [String: SessionLiveActivity] = [:]
-    @Published private(set) var executionWasteAccuracy: ExecutionWasteAccuracySummary?
     @Published private(set) var multiAgentFindings: [MultiAgentAuditFinding] = []
     @Published private(set) var activeExecutionAdvisory: MultiAgentAuditFinding?
+    /// Lifecycle Hook diagnostics are exposed to the floating guardian only;
+    /// subagent turns remain excluded from the menu-bar task list.
+    @Published private(set) var subagentHookHealth: SubagentHookHealthSnapshot?
     @Published private(set) var executionAdvisoryTick = 0
-    @Published private(set) var configurationHookHealth: ConfigurationHookHealth = .awaitingFirstEvent
-    @Published private(set) var configurationHookHealthTick = 0
-    @Published private(set) var configurationHookNoticeDismissed = false
-    @Published private(set) var routingPreferenceProfile: RoutingPreferenceProfile?
-    @Published private(set) var routingEvaluationSamples: [RoutingEvaluationSample] = []
-    @Published private(set) var routingOutcomes: [RoutingOutcomeObservation] = []
+    private var routingPreferenceProfile: RoutingPreferenceProfile?
     @Published private(set) var routingPreflights: [RoutingPreflightObservation] = []
     @Published private(set) var routingPostflights: [String: RoutingPostflightAssessment] = [:]
     @Published private(set) var pendingRoutingReplays: [String: PendingRoutingReplay] = [:]
     @Published private(set) var replayingRoutingSessionID: String?
+    @Published private(set) var routingReplayErrors: [String: String] = [:]
     @Published var errorMessage: String?
     private var scanner: SessionScanner?
     private var liveActivityMonitor: SessionLiveActivityMonitor?
@@ -278,7 +273,9 @@ final class DashboardModel: ObservableObject {
     private var resumeWarningBudget = ResumeWarningBudget()
     private var suppressedExecutionAdvisoryIDs = Set<String>()
     private var announcedExecutionAdvisoryIDs = Set<String>()
-    private var announcedStaleConfigurationHook = false
+    private var codexHookMetadata: [CodexHookMetadata] = []
+    private var codexHookMetadataCheckedAt: Date?
+    private var codexHooksFileModifiedAt: Date?
 
     init() {
         Task { @MainActor [weak self] in self?.start() }
@@ -290,13 +287,13 @@ final class DashboardModel: ObservableObject {
         do {
             let store = try SQLiteStore(path: SessionScanner.defaultDatabasePath())
             routingPreferenceProfile = try store.loadRoutingPreferenceProfile()
-            routingEvaluationSamples = try store.routingEvaluations(limit: 2_000)
-            routingOutcomes = try store.routingOutcomes(limit: 10_000)
             routingPreflights = try store.routingPreflights(limit: 100)
+            subagentHookHealth = try store.subagentHookHealthDiagnostics(limit: 1).first?.snapshot
             scanner = SessionScanner(store: store, codexHome: SessionScanner.defaultCodexHome())
             let bridge = RoutingPreflightBridgeServer { [weak self] replay in
                 Task { @MainActor [weak self] in
                     self?.pendingRoutingReplays[replay.sessionID] = replay
+                    self?.routingReplayErrors.removeValue(forKey: replay.sessionID)
                     self?.refresh(forceDiscover: true)
                 }
             }
@@ -362,6 +359,14 @@ final class DashboardModel: ObservableObject {
         let previousSnapshot = snapshot
         refreshTick += 1
         let discoverNew = forceDiscover || initial || refreshTick % 3 == 0
+        let codexHome = SessionScanner.defaultCodexHome()
+        let hooksFile = codexHome.appendingPathComponent("hooks.json")
+        let hooksModifiedAt = try? hooksFile.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate
+        let refreshHookMetadata = initial || codexHookMetadataCheckedAt == nil ||
+            hooksModifiedAt != codexHooksFileModifiedAt ||
+            Date().timeIntervalSince(codexHookMetadataCheckedAt ?? .distantPast) >= 5 * 60
+        let cachedHookMetadata = codexHookMetadata
         let work = Task.detached(priority: .background) {
             let result = try initial
                 ? scanner.initialIndex()
@@ -375,23 +380,38 @@ final class DashboardModel: ObservableObject {
                 try scanner.backfillExecutionWasteObservations()
                 try scanner.store.reconcilePendingHandoffCosts()
             }
-            let outcomes = try scanner.store.routingOutcomes(limit: 10_000)
             let preflights = try scanner.store.routingPreflights(limit: 100)
-            let wasteAccuracy = try scanner.store.executionWasteAccuracySummary()
             let auditTurns = try scanner.store.turns(limit: 2_000)
             let auditFindings = MultiAgentAuditPolicy.evaluate(turns: auditTurns)
+            let appServerHooks = refreshHookMetadata
+                ? ((try? CodexHooksListReader.read(cwds: [codexHome.path])) ?? [])
+                : cachedHookMetadata
+            let hookHealth = try? scanner.subagentHookHealth(appServerHooks: appServerHooks)
+            if let hookHealth {
+                try? scanner.store.recordSubagentHookHealthDiagnostic(
+                    SubagentHookHealthDiagnostic(snapshot: hookHealth))
+            }
             if initial { _ = malloc_zone_pressure_relief(nil, 0) }
-            return (result, next, outcomes, preflights, wasteAccuracy, auditFindings)
+            return (
+                result, next, preflights, auditFindings,
+                hookHealth, appServerHooks)
         }
         Task { [weak self] in
             do {
-                let (result, next, outcomes, preflights, wasteAccuracy, auditFindings) = try await work.value
+                let (
+                    result, next, preflights, auditFindings,
+                    hookHealth, appServerHooks
+                ) = try await work.value
                 guard let self else { return }
                 self.activePaths = result.activePaths
-                self.routingOutcomes = outcomes
                 self.routingPreflights = preflights
-                self.executionWasteAccuracy = wasteAccuracy
                 self.synchronizeMultiAgentFindings(auditFindings)
+                if let hookHealth { self.subagentHookHealth = hookHealth }
+                if refreshHookMetadata {
+                    self.codexHookMetadata = appServerHooks
+                    self.codexHookMetadataCheckedAt = Date()
+                    self.codexHooksFileModifiedAt = hooksModifiedAt
+                }
                 if let next {
                     self.recordRoutingPostflights(from: self.snapshot, to: next)
                     self.resumeWarningSuppressions.reconcile(with: next.sessions)
@@ -402,10 +422,7 @@ final class DashboardModel: ObservableObject {
                             self.resumeWarning = nil
                         }
                     }
-                    var excluded = self.resumeWarningSuppressions.allSessionIDs
-                    if let migratingSessionID = self.migratingSessionID {
-                        excluded.insert(migratingSessionID)
-                    }
+                    let excluded = self.resumeWarningSuppressions.allSessionIDs
                     let waitingForUser = Set(self.liveActivities.compactMap { sessionID, activity in
                         activity.kind == .waitingForUser ? sessionID : nil
                     })
@@ -420,7 +437,6 @@ final class DashboardModel: ObservableObject {
                         self.resumeWarning = resumed
                     }
                     self.snapshot = next
-                    self.refreshConfigurationHookHealth(preflights: preflights, snapshot: next)
                     self.synchronizeLiveActivityMonitor()
                 }
                 self.isIndexing = false
@@ -462,13 +478,20 @@ final class DashboardModel: ObservableObject {
     func routingPreflight(for sessionID: String) -> RoutingPreflightObservation? {
         guard let latest = routingPreflights.first(where: { $0.belongs(to: sessionID) }),
               latest.blocked,
-              Date().timeIntervalSince(latest.observedAt) < 30 * 60
+              Date().timeIntervalSince(latest.observedAt) < 30 * 60,
+              !latest.isSuperseded(by: snapshot.sessions.first(where: {
+                  $0.sessionID == sessionID
+              })?.latestTurn)
         else { return nil }
         return latest
     }
 
     func pendingRoutingReplay(for sessionID: String) -> PendingRoutingReplay? {
         pendingRoutingReplays[sessionID]
+    }
+
+    func routingReplayError(for sessionID: String) -> String? {
+        routingReplayErrors[sessionID]
     }
 
     func routingPostflight(for sessionID: String) -> RoutingPostflightAssessment? {
@@ -483,12 +506,8 @@ final class DashboardModel: ObservableObject {
         performReplay(replay, using: replay.recommended)
     }
 
-    func rejectRecommendationAndReplay(_ replay: PendingRoutingReplay) {
+    func replayWithOriginalConfiguration(_ replay: PendingRoutingReplay) {
         performReplay(replay, using: replay.current)
-    }
-
-    func cancelRoutingReplay(_ replay: PendingRoutingReplay) {
-        pendingRoutingReplays.removeValue(forKey: replay.sessionID)
     }
 
     func continueObserving(_ finding: MultiAgentAuditFinding) {
@@ -496,56 +515,43 @@ final class DashboardModel: ObservableObject {
         if activeExecutionAdvisory?.id == finding.id { activeExecutionAdvisory = nil }
     }
 
-    func interruptParentTask(for finding: MultiAgentAuditFinding) {
-        guard let turnID = finding.parentTurnID else {
-            errorMessage = L("The parent task has no active turn to interrupt")
-            continueObserving(finding)
-            return
-        }
-        Task { [weak self] in
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                do {
-                    try CodexDesktopTaskControl.interrupt(
-                        sessionID: finding.parentSessionID,
-                        turnID: turnID)
-                    return .success(())
-                } catch {
-                    return .failure(error)
-                }
-            }.value
-            guard let self else { return }
-            switch result {
-            case .success:
-                self.continueObserving(finding)
-                self.refresh(forceDiscover: true)
-            case let .failure(error):
-                self.errorMessage = LF("Could not interrupt the parent task: %@", error.localizedDescription)
-            }
-        }
-    }
-
-    func dismissConfigurationHookHealthNotice() {
-        configurationHookNoticeDismissed = true
-    }
-
     private func performReplay(_ replay: PendingRoutingReplay, using selection: RoutingSelection) {
         guard replayingRoutingSessionID == nil else { return }
         replayingRoutingSessionID = replay.sessionID
+        routingReplayErrors.removeValue(forKey: replay.sessionID)
         let databasePath = SessionScanner.defaultDatabasePath()
         Task { [weak self] in
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+            let result: Result<CodexDesktopReplayReceipt, Error> = await Task.detached(priority: .userInitiated) {
                 do {
                 let store = try SQLiteStore(path: databasePath)
                 try store.saveRoutingPreflightBypass(RoutingPreflightBypass(
                     sessionID: replay.sessionID,
                     prompt: replay.prompt))
-                _ = try CodexDesktopTurnReplay.replay(
+                let receipt = try CodexDesktopTurnReplay.replay(
                     sessionID: replay.sessionID,
                     prompt: replay.prompt,
                     model: selection.model,
-                    reasoningEffort: selection.reasoningEffort)
-                    return .success(())
+                    reasoningEffort: selection.reasoningEffort,
+                    previousSelection: replay.current)
+                    try? store.recordRoutingHookDiagnostic(RoutingHookDiagnostic(
+                        sessionID: replay.sessionID,
+                        outcome: .allowed,
+                        reasonCode: "replay_configuration_verified",
+                        requestedSelection: selection,
+                        actualSelection: receipt.actual))
+                    return .success(receipt)
                 } catch {
+                    if let store = try? SQLiteStore(path: databasePath) {
+                        _ = try? store.consumeRoutingPreflightBypass(
+                            sessionID: replay.sessionID,
+                            prompt: replay.prompt)
+                        try? store.recordRoutingHookDiagnostic(RoutingHookDiagnostic(
+                            sessionID: replay.sessionID,
+                            outcome: .failed,
+                            reasonCode: "replay_configuration_not_verified",
+                            requestedSelection: selection,
+                            actualSelection: (error as? CodexDesktopReplayError)?.actualSelection))
+                    }
                     return .failure(error)
                 }
             }.value
@@ -554,10 +560,12 @@ final class DashboardModel: ObservableObject {
             switch result {
             case .success:
                 self.pendingRoutingReplays.removeValue(forKey: replay.sessionID)
+                self.routingReplayErrors.removeValue(forKey: replay.sessionID)
                 self.refresh(forceDiscover: true)
             case let .failure(error):
-                self.pendingRoutingReplays.removeValue(forKey: replay.sessionID)
-                self.errorMessage = LF("Could not switch and replay: %@", error.localizedDescription)
+                let message = LF("Could not verify switch and replay: %@", error.localizedDescription)
+                self.routingReplayErrors[replay.sessionID] = message
+                self.errorMessage = message
             }
         }
     }
@@ -596,42 +604,12 @@ final class DashboardModel: ObservableObject {
         multiAgentFindings = findings
         let next = findings.first {
             $0.isActive &&
-                $0.severity == .considerInterrupting &&
+                $0.severity == .observeDuringExecution &&
                 !suppressedExecutionAdvisoryIDs.contains($0.id)
         }
         activeExecutionAdvisory = next
         if let next, announcedExecutionAdvisoryIDs.insert(next.id).inserted {
             executionAdvisoryTick &+= 1
-        }
-    }
-
-    private func refreshConfigurationHookHealth(
-        preflights: [RoutingPreflightObservation],
-        snapshot: DashboardSnapshot
-    ) {
-        let hookURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/hooks.json")
-        let data = try? Data(contentsOf: hookURL)
-        let installed = data.flatMap { String(data: $0, encoding: .utf8) }?
-            .contains("--user-prompt-submit-hook") == true
-        let modifiedAt = try? hookURL.resourceValues(forKeys: [.contentModificationDateKey])
-            .contentModificationDate
-        let latestUserTurnAt = snapshot.recent
-            .filter { $0.isSubagent != true }
-            .map(\.sortDate)
-            .max()
-        let health = ConfigurationHookHealth.evaluate(
-            installed: installed,
-            hookModifiedAt: modifiedAt,
-            latestPreflightAt: preflights.map(\.observedAt).max(),
-            latestUserTurnAt: latestUserTurnAt)
-        configurationHookHealth = health
-        if health == .staleAfterInstallation, !announcedStaleConfigurationHook {
-            announcedStaleConfigurationHook = true
-            configurationHookNoticeDismissed = false
-            configurationHookHealthTick &+= 1
-        } else if health != .staleAfterInstallation {
-            announcedStaleConfigurationHook = false
         }
     }
 
@@ -653,78 +631,30 @@ final class DashboardModel: ObservableObject {
     }
 
     func prepareFreshSession(_ session: SessionSummary) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L("Summarize context and start a fresh task?")
-        alert.informativeText = LF(
-            "Reason: %@\n\n%@ asks the source task's model for a quality-first structured summary, then validates every required section before creating a fresh task. It does not use the local heuristic capsule as the default handoff. If the source task is still producing output, its current turn is interrupted first. The source task is never archived or deleted automatically.",
-            localizedReason(for: session),
-            AppVersion.displayName)
-        alert.addButton(withTitle: L("Summarize & start fresh"))
-        alert.addButton(withTitle: L("Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        migrate(session)
-    }
-
-    private func migrate(_ session: SessionSummary) {
-        guard migratingSessionID == nil else { return }
-        resumeWarningSuppressions.suppress(session.sessionID)
-        resumeWarning = nil
-        migratingSessionID = session.sessionID
-        migrationProgress = L("pet.handoff.preparing")
-        let sourceThreadID = session.sessionID
-        let sourceTitle = session.title
-        let cwd = session.cwd
-        let currentTurnID = session.latestTurn?.turnID
-        let migrationStartedAt = Date()
-        let progressSink = HandoffProgressSink(model: self)
-        // Ensure Codex Desktop owns and displays the source before follower IPC.
-        openSession(sourceThreadID)
-        Task { @MainActor [weak self] in
-            do {
-                let migrator = try CodexHandoffMigrator()
-                try await Task.sleep(for: .milliseconds(500))
-                let result = try await Task.detached(priority: .userInitiated) {
-                    return try migrator.migrate(
-                        sourceThreadID: sourceThreadID,
-                        sourceTitle: sourceTitle,
-                        cwd: cwd,
-                        interruptActiveTurn: session.isActive,
-                        currentTurnID: currentTurnID,
-                        progress: { step in
-                            progressSink.send(step)
-                        })
-                }.value
-                guard let self else { return }
-                let cost = HandoffCostRecord(
-                    sourceSessionID: result.sourceThreadID,
-                    destinationSessionID: result.newThreadID,
-                    sourceSummaryTurnID: result.sourceSummaryTurnID,
-                    destinationAcknowledgementTurnID: result.destinationAcknowledgementTurnID,
-                    preparationMethod: result.preparationMethod,
-                    deliveryMethod: result.deliveryMethod,
-                    startedAt: migrationStartedAt,
-                    payload: result.handoff)
-                try? self.scanner?.store.upsertHandoffCost(cost)
-                self.migrationProgress = L("pet.handoff.complete")
-                self.migrationCompletionTick &+= 1
-                try await Task.sleep(for: .milliseconds(450))
-                self.migratingSessionID = nil
-                self.migrationProgress = nil
-                self.refresh(forceDiscover: true)
-                self.openSession(result.newThreadID)
-            } catch {
-                guard let self else { return }
-                self.migratingSessionID = nil
-                self.migrationProgress = nil
-                let failure = NSAlert(error: error)
-                failure.messageText = L("Could not start a fresh task")
-                failure.informativeText = LF(
-                    "%@\n\nThe source task was not archived or deleted and remains available.",
-                    error.localizedDescription)
-                failure.runModal()
-            }
+        guard !session.isActive else {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L("Wait until the task is idle")
+            alert.informativeText = L("Guardian will not interrupt a running task. When it is idle, ask Codex to summarize the necessary context and open a new task.")
+            alert.runModal()
+            return
         }
+        guard let turn = session.latestTurn,
+              let model = turn.model,
+              let effort = turn.reasoningEffort
+        else {
+            errorMessage = L("Could not read this task's current model configuration.")
+            return
+        }
+        let selection = RoutingSelection(model: model, reasoningEffort: effort)
+        let handoffInstruction = PendingRoutingReplay(
+            sessionID: session.sessionID,
+            prompt: CodexManagedHandoff.instruction,
+            current: selection,
+            recommended: selection,
+            reasonCode: "codex_managed_handoff",
+            upgradeCondition: nil)
+        performReplay(handoffInstruction, using: selection)
     }
 
     func dismissResumeWarning() {
@@ -744,7 +674,7 @@ final class DashboardModel: ObservableObject {
         let policy = snapshot.healthPolicy
         let pressure = session.latestTurn?.contextPressure
         if session.postCompactionRebound {
-            return L("Context rose quickly after a recent compaction. Start fresh before resuming.")
+            return L("Context rose quickly after a recent compaction. Keep observing task continuity.")
         }
         if let pressure, pressure >= policy.redContext {
             return LF(
@@ -770,20 +700,6 @@ final class DashboardModel: ObservableObject {
                 Int(policy.amberContext * 100))
         }
         return L("Watch this session for health changes.")
-    }
-}
-
-private final class HandoffProgressSink: @unchecked Sendable {
-    private weak var model: DashboardModel?
-
-    @MainActor init(model: DashboardModel) {
-        self.model = model
-    }
-
-    func send(_ step: String) {
-        Task { @MainActor [weak self] in
-            self?.model?.migrationProgress = localizedMigrationProgress(step)
-        }
     }
 }
 
@@ -989,22 +905,6 @@ private struct DashboardView: View {
                         quota: model.snapshot.latestQuota,
                         policy: model.snapshot.healthPolicy,
                         speechIntensity: xiaoxinSpeechIntensity(speechIntensityRawValue))
-
-                    if let accuracy = model.executionWasteAccuracy {
-                        ExecutionWasteCalibrationCard(summary: accuracy)
-                    }
-
-                    if !model.multiAgentFindings.isEmpty ||
-                        model.configurationHookHealth == .staleAfterInstallation {
-                        ExecutionAdvisoryCard(model: model)
-                    }
-
-                    if let profile = model.routingPreferenceProfile {
-                        RoutingPreferenceCard(
-                            profile: profile,
-                            samples: model.routingEvaluationSamples,
-                            outcomes: model.routingOutcomes)
-                    }
 
                     sectionHeader(L("Tasks"), count: sessions.count, note: L("Most recently executed first"))
                     if sessions.isEmpty {
@@ -1230,238 +1130,16 @@ private struct DashboardView: View {
     }
 }
 
-private struct RoutingPreferenceCard: View {
-    let profile: RoutingPreferenceProfile
-    let samples: [RoutingEvaluationSample]
-    let outcomes: [RoutingOutcomeObservation]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(L("Adaptive model routing"), systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.orange)
-                Spacer()
-                Text(L("Learning locally"))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            ForEach(profile.routes, id: \.lane.rawValue) { route in
-                HStack(spacing: 10) {
-                    Image(systemName: laneIcon(route.lane))
-                        .frame(width: 18)
-                        .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(laneTitle(route.lane)).font(.caption.weight(.semibold))
-                        Text(officialRoleDescription(route.model)).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text("\(shortModel(route.model)) / \(route.reasoningEffort)")
-                            .font(.caption.monospaced().weight(.semibold))
-                        Text(effortEvaluationLabel(route))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(qualityEvidenceLabel(route))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            Text(L("This panel records route baselines and local comparison evidence. It does not predict your next task or switch a running task."))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(13)
-        .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.30)))
-    }
-
-    private func shortModel(_ model: String) -> String {
-        model.replacingOccurrences(of: "gpt-5.6-", with: "")
-    }
-
-    private func laneTitle(_ lane: RoutingWorkloadLane) -> String {
-        switch lane {
-        case .controllerArchitecture: L("Architecture and control")
-        case .frozenExecution: L("Frozen execution")
-        case .judgmentDenseExecution: L("Judgment-dense execution")
-        }
-    }
-
-    private func officialRoleDescription(_ model: String) -> String {
-        switch OfficialRoutingPolicy.role(for: model) {
-        case .frontierCapability: L("Official role: frontier capability")
-        case .balancedIntelligenceCost: L("Official role: intelligence and cost balance")
-        case .efficientHighVolume: L("Official role: efficient high-volume work")
-        case .unknown: L("Official role: unknown")
-        }
-    }
-
-    private func effortEvaluationLabel(_ route: RoutingBaselineRoute) -> String {
-        guard let comparison = OfficialRoutingPolicy.comparisonEffort(for: route.reasoningEffort) else {
-            return L("Balanced starting effort")
-        }
-        let relevant = samples.filter { $0.habitLane == route.lane &&
-            $0.model.caseInsensitiveCompare(route.model) == .orderedSame }
-        let gate = RoutingEvaluationGate.evaluate(
-            relevant,
-            baselineEffort: route.reasoningEffort,
-            candidateEffort: comparison)
-        let candidateOutcomes = outcomes.filter {
-            $0.model.caseInsensitiveCompare(route.model) == .orderedSame &&
-                $0.reasoningEffort.caseInsensitiveCompare(comparison) == .orderedSame
-        }
-        let online = RoutingOnlineLearningGate.evaluate(
-            controlledGate: gate,
-            candidateOutcomes: candidateOutcomes)
-        switch online.state {
-        case .withdrawn:
-            return LF("Keep %@ · candidate failed quality", route.reasoningEffort)
-        case .personalizationReady:
-            return LF("%@ comparison verified locally", comparison)
-        case .qualityObserving:
-            return LF("%@ quality: %lld/%lld verified", comparison, online.verifiedSuccesses, online.requiredSuccesses)
-        case .trialReady, .notEligible:
-            break
-        }
-        switch gate.state {
-        case .candidateTrialReady:
-            return LF("%@ comparison · %.0f%% fewer Tokens", comparison, gate.tokenSavingsRatio * 100)
-        case .candidateReadyForPersonalization:
-            return LF("%@ comparison verified locally", comparison)
-        case .candidateFailedQuality:
-            return LF("Keep %@ · candidate failed quality", route.reasoningEffort)
-        case .noMeasuredEfficiencyGain:
-            return LF("Keep %@ · no measured gain", route.reasoningEffort)
-        case .insufficientComparableSamples:
-            return LF("Pending comparison: %@", comparison)
-        }
-    }
-
-    private func qualityEvidenceLabel(_ route: RoutingBaselineRoute) -> String {
-        let relevant = outcomes.filter {
-            $0.model.caseInsensitiveCompare(route.model) == .orderedSame &&
-                $0.reasoningEffort.caseInsensitiveCompare(route.reasoningEffort) == .orderedSame
-        }
-        let summary = RoutingOutcomeSummary.build(from: relevant)
-        return LF(
-            "%lld verified · %lld failed · %lld unverified",
-            summary.verifiedSuccesses,
-            summary.verifiedFailures,
-            summary.completedUnverified + summary.interrupted)
-    }
-
-    private func laneIcon(_ lane: RoutingWorkloadLane) -> String {
-        switch lane {
-        case .controllerArchitecture: "network"
-        case .frozenExecution: "checkmark.seal"
-        case .judgmentDenseExecution: "brain.head.profile"
-        }
-    }
-
-}
-
-private struct ExecutionWasteCalibrationCard: View {
-    let summary: ExecutionWasteAccuracySummary
-
-    private var milestone: ExecutionWasteCalibrationMilestone? {
-        ExecutionWasteCalibrationMilestone.derive(from: summary)
-    }
-
-    private var statusText: String {
-        guard let milestone else { return L("Shadow calibration in progress") }
-        return milestone.outcome == .semanticContinuityReady
-            ? L("Ready for semantic continuity phase")
-            : L("Calibration not passed; continuing in shadow mode")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Label(L("Execution waste calibration"), systemImage: "gauge.with.dots.needle.50percent")
-                    .font(.subheadline.weight(.bold))
-                Spacer()
-                Text("\(summary.overall.conclusiveSamples)/\(summary.minimumConclusiveSamples)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            ProgressView(
-                value: Double(min(summary.overall.conclusiveSamples, summary.minimumConclusiveSamples)),
-                total: Double(summary.minimumConclusiveSamples))
-                .tint(.cyan)
-            HStack {
-                Text(statusText)
-                Spacer()
-                Text(LF("Reasons %lld/%lld", summary.coveredReasonCount, summary.totalReasonCount))
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        }
-        .padding(13)
-        .background(
-            Color(nsColor: .controlBackgroundColor).opacity(0.72),
-            in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.cyan.opacity(0.12)))
-    }
-}
-
-private struct ExecutionAdvisoryCard: View {
-    @ObservedObject var model: DashboardModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(L("Execution strategy audit"), systemImage: "point.3.connected.trianglepath.dotted")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.orange)
-            if model.configurationHookHealth == .staleAfterInstallation {
-                Label(L("Configuration Hook has not delivered any events since installation. Fully restart Codex Desktop, then send one prompt to verify it."), systemImage: "bolt.slash.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            ForEach(model.multiAgentFindings.prefix(3)) { finding in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(finding.taskName).font(.caption.weight(.bold)).lineLimit(1)
-                        Spacer()
-                        Text(finding.isActive ? L("Running") : L("Completed review"))
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(finding.isActive ? .red : .secondary)
-                    }
-                    Text(multiAgentFindingText(finding))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if finding.isActive && finding.severity == .considerInterrupting {
-                        HStack {
-                            Button(L("Interrupt parent task")) { model.interruptParentTask(for: finding) }
-                                .buttonStyle(.borderless)
-                                .foregroundStyle(.red)
-                            Button(L("Continue observing")) { model.continueObserving(finding) }
-                                .buttonStyle(.borderless)
-                        }
-                    }
-                }
-                .padding(9)
-                .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
-            }
-        }
-        .padding(13)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.72), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.22)))
-    }
-}
-
 private func multiAgentFindingText(_ finding: MultiAgentAuditFinding) -> String {
     switch finding.reason {
     case .genericWorkerInheritedFullHistory:
         return L("A generic worker inherited the full conversation. Next time use a bounded agent with fork_turns:none and an exact task envelope.")
     case .boundedWorkerInheritedFullHistory:
         return L("A bounded agent inherited the full conversation. Prefer fork_turns:none when the task has a frozen input contract.")
+    case .unknownAgentInheritedFullHistory:
+        return L("A child agent inherited the full conversation. Codex did not expose a specific agent type for this full-history fork.")
     case .largeTokenBurn:
-        return LF("This child task has consumed %@ provider tokens (%@ weighted). Check whether it is still producing new evidence.", compactTokenCount(finding.usage.total), compactTokenCount(finding.weightedTokenBurn))
+        return LF("This child task has consumed %@ provider tokens (%@ weighted). This is observed usage, not an estimate of avoidable cost.", compactTokenCount(finding.usage.total), compactTokenCount(finding.weightedTokenBurn))
     case .broadParallelFanout:
         return L("Several child agents are active under one parent task. Keep only independently useful lanes running.")
     }
@@ -1651,19 +1329,19 @@ private struct SessionCard: View {
                     Label(L("Open source task"), systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.borderless)
-                if !session.isActive && session.risk != .green {
+                if !session.isActive {
                     Button { model.prepareFreshSession(session) } label: {
-                        if model.migratingSessionID == session.sessionID {
+                        if model.replayingRoutingSessionID == session.sessionID {
                             HStack(spacing: 5) {
                                 ProgressView().controlSize(.small)
-                                Text(model.migrationProgress ?? L("Preparing fresh task"))
+                                Text(L("Asking Codex…"))
                             }
                         } else {
-                            Label(L("Summarize & start fresh"), systemImage: "arrow.triangle.branch")
+                            Label(L("Ask Codex to summarize & start fresh"), systemImage: "arrow.triangle.branch")
                         }
                     }
                     .buttonStyle(.borderless)
-                    .disabled(model.migratingSessionID != nil)
+                    .disabled(model.replayingRoutingSessionID != nil)
                 }
                 Spacer()
                 Button(action: onToggle) {
@@ -1733,15 +1411,13 @@ private struct NativePetDragSurface: NSViewRepresentable {
     let onDragBegan: () -> Void
     let onDragEnded: (Bool) -> Void
     let onDoubleClick: () -> Void
-    let onRightClick: () -> Void
 
     func makeNSView(context: Context) -> NativePetDragView {
         NativePetDragView(
             onHover: onHover,
             onDragBegan: onDragBegan,
             onDragEnded: onDragEnded,
-            onDoubleClick: onDoubleClick,
-            onRightClick: onRightClick)
+            onDoubleClick: onDoubleClick)
     }
 
     func updateNSView(_ view: NativePetDragView, context: Context) {
@@ -1749,7 +1425,6 @@ private struct NativePetDragSurface: NSViewRepresentable {
         view.onDragBegan = onDragBegan
         view.onDragEnded = onDragEnded
         view.onDoubleClick = onDoubleClick
-        view.onRightClick = onRightClick
     }
 }
 
@@ -1758,7 +1433,6 @@ private final class NativePetDragView: NSView {
     var onDragBegan: () -> Void
     var onDragEnded: (Bool) -> Void
     var onDoubleClick: () -> Void
-    var onRightClick: () -> Void
     private var trackingArea: NSTrackingArea?
     private var dragActive = false
     private var pointerInside = false
@@ -1768,14 +1442,12 @@ private final class NativePetDragView: NSView {
         onHover: @escaping (Bool) -> Void,
         onDragBegan: @escaping () -> Void,
         onDragEnded: @escaping (Bool) -> Void,
-        onDoubleClick: @escaping () -> Void,
-        onRightClick: @escaping () -> Void
+        onDoubleClick: @escaping () -> Void
     ) {
         self.onHover = onHover
         self.onDragBegan = onDragBegan
         self.onDragEnded = onDragEnded
         self.onDoubleClick = onDoubleClick
-        self.onRightClick = onRightClick
         super.init(frame: .zero)
     }
 
@@ -1850,12 +1522,6 @@ private final class NativePetDragView: NSView {
         updateHover(bounds.contains(convert(windowPoint, from: nil)))
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        pendingSingleClick?.cancel()
-        pendingSingleClick = nil
-        onRightClick()
-    }
-
     private func updateHover(_ inside: Bool) {
         guard pointerInside != inside else { return }
         pointerInside = inside
@@ -1900,9 +1566,6 @@ private final class FloatingPetController {
             onNativeDragEnded: { [weak self] in
                 self?.nativeDragEnded()
             },
-            onToggleVisibility: { [weak self] in
-                self?.toggleVisibility()
-            },
             isPointerInsidePanel: { [weak hoverPanel] in
                 guard let hoverPanel else { return false }
                 return hoverPanel.frame.contains(NSEvent.mouseLocation)
@@ -1920,12 +1583,6 @@ private final class FloatingPetController {
         } else {
             panel.orderOut(nil)
         }
-    }
-
-    private func toggleVisibility() {
-        let next = !FloatingPetPreference.isVisible
-        FloatingPetPreference.setVisible(next)
-        setVisible(next)
     }
 
     func refreshPlacementAfterLaunch() {
@@ -1997,7 +1654,7 @@ private final class FloatingPetController {
             size = NSSize(width: 640, height: min(796, 166 + CGFloat(visibleCards) * 146))
         }
         if petAnchor == .zero { petAnchor = NSPoint(x: panel.frame.maxX, y: panel.frame.minY) }
-        let screenFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+        let screenFrame = visibleFrame(forPetAnchor: petAnchor)
         // `petAnchor` belongs to the mascot, not to the temporary card size.
         // Re-clamping it with the expanded 640pt panel made the mascot move
         // when hover collapse switched back to the 116pt footprint.
@@ -2016,8 +1673,8 @@ private final class FloatingPetController {
     }
 
     private func nativeDragEnded() {
-        let screenFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
         let proposed = NSPoint(x: panel.frame.maxX, y: panel.frame.minY)
+        let screenFrame = visibleFrame(forPetAnchor: proposed)
         petAnchor = FloatingPetGeometry.constrainedPetAnchor(
             proposed,
             petSize: collapsedSize,
@@ -2033,6 +1690,14 @@ private final class FloatingPetController {
     private func origin(for anchor: NSPoint, size: NSSize) -> NSPoint {
         FloatingPetGeometry.panelOrigin(forPetAnchor: anchor, panelSize: size)
     }
+
+    private func visibleFrame(forPetAnchor anchor: NSPoint) -> NSRect {
+        FloatingPetGeometry.visibleFrame(
+            forPetAnchor: anchor,
+            petSize: collapsedSize,
+            screenVisibleFrames: NSScreen.screens.map(\.visibleFrame)) ??
+            NSScreen.main?.visibleFrame ?? panel.frame
+    }
 }
 
 private enum FloatingPanelMode: Equatable {
@@ -2045,7 +1710,6 @@ private struct FloatingPetView: View {
     @ObservedObject var model: DashboardModel
     let onLayoutChange: (FloatingPanelMode, Int) -> Void
     let onNativeDragEnded: () -> Void
-    let onToggleVisibility: () -> Void
     let isPointerInsidePanel: () -> Bool
     @State private var mode: FloatingPanelMode = .collapsed
     @State private var pinned = false
@@ -2071,8 +1735,10 @@ private struct FloatingPetView: View {
         let stabilized = FloatingPetGeometry.stabilizedSessions(
             frozen: frozenSessions,
             current: model.snapshot.activeSessions)
-        guard let pendingID = model.pendingRoutingReplays.values
-            .max(by: { $0.observedAt < $1.observedAt })?.sessionID,
+        let routingPending = model.pendingRoutingReplays.values
+            .map { ($0.sessionID, $0.observedAt) }
+        guard let pendingID = routingPending
+            .max(by: { $0.1 < $1.1 })?.0,
               let pendingSession = model.snapshot.sessions.first(where: { $0.sessionID == pendingID })
         else { return stabilized }
         return [pendingSession] + stabilized.filter { $0.sessionID != pendingID }
@@ -2097,7 +1763,6 @@ private struct FloatingPetView: View {
     }
 
     private var currentSpeechContext: XiaoxinSpeechContext {
-        if model.migrationProgress != nil { return .handoff }
         let active = model.snapshot.activeSessions
         if let attentionLiveActivity { return attentionLiveActivity.kind.speechContext }
         if active.contains(where: { $0.risk == .red }) { return .danger }
@@ -2149,8 +1814,9 @@ private struct FloatingPetView: View {
     }
 
     private var routingAttentionFingerprint: String {
-        model.pendingRoutingReplays.values
+        let routing = model.pendingRoutingReplays.values
             .map { "\($0.sessionID):\($0.observedAt.timeIntervalSince1970):\($0.recommended.model):\($0.recommended.reasoningEffort)" }
+        return routing
             .sorted()
             .joined(separator: "|")
     }
@@ -2176,9 +1842,8 @@ private struct FloatingPetView: View {
                     if let finding = model.activeExecutionAdvisory {
                         FloatingExecutionAdvisoryCard(finding: finding, model: model)
                     }
-                    if model.configurationHookHealth == .staleAfterInstallation &&
-                        !model.configurationHookNoticeDismissed {
-                        FloatingHookHealthCard(model: model)
+                    if let hookHealth = model.subagentHookHealth, hookHealth.requiresAttention {
+                        FloatingSubagentHookHealthCard(snapshot: hookHealth)
                     }
                     if let warning = model.resumeWarning {
                         FloatingResumeWarningCard(session: warning, model: model)
@@ -2230,8 +1895,7 @@ private struct FloatingPetView: View {
                     .frame(width: 106, height: 116, alignment: .bottomTrailing)
                     .shadow(color: .black.opacity(0.24), radius: 7, y: 5)
                     .overlay(alignment: .topTrailing) {
-                        if model.activeExecutionAdvisory != nil ||
-                            model.configurationHookHealth == .staleAfterInstallation {
+                        if model.activeExecutionAdvisory != nil {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.white)
@@ -2243,6 +1907,18 @@ private struct FloatingPetView: View {
                                 .padding(.trailing, 2)
                                 .allowsHitTesting(false)
                                 .accessibilityLabel(L("Execution strategy needs attention"))
+                        } else if let hookHealth = model.subagentHookHealth, hookHealth.requiresAttention {
+                            Image(systemName: "link.badge.plus")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 24, height: 24)
+                                .background(.orange, in: Circle())
+                                .overlay(Circle().stroke(.white.opacity(0.72), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.32), radius: 4, y: 2)
+                                .padding(.top, 3)
+                                .padding(.trailing, 2)
+                                .allowsHitTesting(false)
+                                .accessibilityLabel(L("Subagent lifecycle monitoring"))
                         } else if routingAttentionSessionID != nil {
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.caption.weight(.bold))
@@ -2301,8 +1977,7 @@ private struct FloatingPetView: View {
                     },
                     onDoubleClick: {
                         playDoubleClickReaction()
-                    },
-                    onRightClick: onToggleVisibility)
+                    })
 
                 if let speechKey, !dragInProgress {
                     XiaoxinSpeechBubble(text: L(speechKey))
@@ -2390,26 +2065,12 @@ private struct FloatingPetView: View {
         .onChange(of: model.manualRefreshCompletionTick) { _, _ in
             showSpeech(for: .refresh)
         }
-        .onChange(of: model.migrationProgress) { _, progress in
-            guard progress != nil else { return }
-            showSpeech(for: .handoff, bypassMinimumGap: true)
-        }
-        .onChange(of: model.migrationCompletionTick) { _, _ in
-            showSpeech(for: .success, bypassMinimumGap: true)
-        }
         .onChange(of: model.executionAdvisoryTick) { _, _ in
             invalidatePendingCollapse()
             pinned = true
             mode = .stacked
             onLayoutChange(.stacked, max(1, displayedSessions.count))
             showSpeech(for: .executionAdvisory, bypassMinimumGap: true)
-        }
-        .onChange(of: model.configurationHookHealthTick) { _, _ in
-            invalidatePendingCollapse()
-            pinned = true
-            mode = .stacked
-            onLayoutChange(.stacked, max(1, displayedSessions.count))
-            showSpeech(for: .configurationHookStale, bypassMinimumGap: true)
         }
         .onChange(of: speechIntensityRawValue) { _, _ in
             if speechIntensity == .off {
@@ -2791,9 +2452,9 @@ private struct FloatingSessionCard: View {
                         reasonCode: replay.reasonCode,
                         canReplay: true,
                         isReplaying: model.replayingRoutingSessionID == session.sessionID,
+                        errorMessage: model.routingReplayError(for: session.sessionID),
                         onReplay: { model.replayWithRecommendation(replay) },
-                        onKeepCurrent: { model.rejectRecommendationAndReplay(replay) },
-                        onCancel: { model.cancelRoutingReplay(replay) })
+                        onKeepCurrent: { model.replayWithOriginalConfiguration(replay) })
                 } else if let decision = model.routingPreflight(for: session.sessionID),
                           let recommended = decision.recommended {
                     FloatingRoutingPreflightView(
@@ -2802,9 +2463,9 @@ private struct FloatingSessionCard: View {
                         reasonCode: decision.reasonCode,
                         canReplay: false,
                         isReplaying: false,
+                        errorMessage: nil,
                         onReplay: {},
-                        onKeepCurrent: nil,
-                        onCancel: nil)
+                        onKeepCurrent: nil)
                 } else if let assessment = model.routingPostflight(for: session.sessionID) {
                     FloatingRoutingPostflightView(assessment: assessment)
                 } else {
@@ -2881,9 +2542,9 @@ private struct FloatingRoutingPreflightView: View {
     let reasonCode: String
     let canReplay: Bool
     let isReplaying: Bool
+    let errorMessage: String?
     let onReplay: () -> Void
     let onKeepCurrent: (() -> Void)?
-    let onCancel: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -2905,29 +2566,30 @@ private struct FloatingRoutingPreflightView: View {
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.64))
                     .lineLimit(1)
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.red.opacity(0.9))
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: 6)
             if canReplay {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Button(isReplaying ? L("Switching…") : L("Switch & replay"), action: onReplay)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Button(
+                        isReplaying ? L("Applying configuration…") : L("Switch configuration & continue"),
+                        action: onReplay)
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
                         .controlSize(.small)
-                        .disabled(isReplaying)
-                    HStack(spacing: 7) {
-                        if let onKeepCurrent {
-                            Button(L("Continue with current"), action: onKeepCurrent)
-                                .buttonStyle(.plain)
-                        }
-                        if let onCancel {
-                            Button(L("Cancel"), action: onCancel)
-                                .buttonStyle(.plain)
-                        }
+                    if let onKeepCurrent {
+                        Button(L("Continue with original configuration"), action: onKeepCurrent)
+                            .buttonStyle(.plain)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.72))
                     }
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .disabled(isReplaying)
                 }
+                    .disabled(isReplaying)
             } else {
                 Text(L("Open task to resend"))
                     .font(.caption2.weight(.semibold))
@@ -2936,7 +2598,7 @@ private struct FloatingRoutingPreflightView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .frame(height: 70)
+        .frame(minHeight: 70)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.34)))
     }
@@ -3056,7 +2718,7 @@ private struct FloatingResumeWarningCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.72))
                 .lineLimit(2)
-            Text(L("This task is still producing output. If you choose “Interrupt & start fresh,” the guardian asks Codex Desktop to stop the current turn, waits for it to become idle, then creates a validated handoff and fresh task."))
+            Text(L("This task is still producing output. Guardian will not interrupt it or create a task. When it becomes idle, you can ask Codex itself to summarize the necessary context and open a new task."))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.58))
                 .fixedSize(horizontal: false, vertical: true)
@@ -3068,7 +2730,7 @@ private struct FloatingResumeWarningCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
-                Button(L("Interrupt & start fresh")) {
+                Button(L("Ask Codex to summarize & start fresh")) {
                     model.prepareFreshSession(session)
                     model.dismissResumeWarning()
                 }
@@ -3098,11 +2760,11 @@ private struct FloatingExecutionAdvisoryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(L("Execution waste is rising"), systemImage: "exclamationmark.triangle.fill")
+                Label(L("Child-agent context needs attention"), systemImage: "exclamationmark.triangle.fill")
                     .font(.headline)
                     .foregroundStyle(.orange)
                 Spacer()
-                Text(L("Guardian only advises"))
+                Text(L("Observation only"))
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -3112,11 +2774,9 @@ private struct FloatingExecutionAdvisoryCard: View {
                 .foregroundStyle(.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 14) {
-                Button(L("Interrupt parent task")) { model.interruptParentTask(for: finding) }
+                Button(L("Got it")) { model.continueObserving(finding) }
                     .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                Button(L("Continue observing")) { model.continueObserving(finding) }
-                    .buttonStyle(.borderless)
+                    .tint(.orange)
                 Spacer()
             }
         }
@@ -3133,30 +2793,67 @@ private struct FloatingExecutionAdvisoryCard: View {
     }
 }
 
-private struct FloatingHookHealthCard: View {
-    @ObservedObject var model: DashboardModel
+private struct FloatingSubagentHookHealthCard: View {
+    let snapshot: SubagentHookHealthSnapshot
+
+    private func stateText(_ state: SubagentHookHealthState) -> String {
+        switch state {
+        case .notInstalled: L("Not installed")
+        case .installedButUntrusted: L("Installed but not trusted")
+        case .awaitingFirstEvent: L("Awaiting first lifecycle event")
+        case .healthy: L("Healthy")
+        case .stale: L("Stale")
+        }
+    }
+
+    private var guidance: String {
+        if snapshot.start.state == .installedButUntrusted || snapshot.stop.state == .installedButUntrusted {
+            return L("Open Codex /hooks to review and trust both handlers. Guardian does not edit config.toml.")
+        }
+        if snapshot.start.state == .stale || snapshot.stop.state == .stale {
+            return L("Rollout activity was observed without a recent lifecycle event. Fully restart Codex Desktop; Guardian does not edit config.toml.")
+        }
+        return L("Review the lifecycle handlers in Codex /hooks. Guardian does not edit config.toml.")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(L("Configuration reminder Hook is inactive"), systemImage: "bolt.slash.fill")
-                .font(.headline)
-                .foregroundStyle(.red)
-            Text(L("No configuration event reached Guardian after installation. Fully restart Codex Desktop, then send one prompt; Guardian will verify the chain automatically."))
-                .font(.subheadline)
+            HStack {
+                Label(L("Subagent lifecycle monitoring"), systemImage: "link.badge.plus")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Spacer()
+                Text(L("Observation only"))
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            HStack(spacing: 14) {
+                hookStatus(label: L("Start Hook"), state: snapshot.start.state)
+                hookStatus(label: L("Stop Hook"), state: snapshot.stop.state)
+            }
+            Text(guidance)
+                .font(.caption)
                 .foregroundStyle(.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button(L("Got it")) { model.dismissConfigurationHookHealthNotice() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                Spacer()
-            }
         }
         .padding(18)
-        .frame(width: 556, height: 144, alignment: .topLeading)
-        .background(.black.opacity(0.96), in: RoundedRectangle(cornerRadius: 24))
-        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.red.opacity(0.42)))
+        .frame(minWidth: 556, maxWidth: 556, minHeight: 150, alignment: .topLeading)
+        .background(
+            LinearGradient(
+                colors: [.black.opacity(0.97), .orange.opacity(0.18)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.orange.opacity(0.42)))
         .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+    }
+
+    private func hookStatus(label: String, state: SubagentHookHealthState) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.62))
+            Text(stateText(state)).font(.subheadline.weight(.bold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -3182,7 +2879,7 @@ private struct FloatingEmptyCard: View {
                     speechIntensity: speechIntensity),
                 foreground: .white.opacity(0.68),
                 iconColor: .orange)
-            Text(L("Default entry: terra/medium · Xiaoxin checks every task before execution"))
+            Text(L("Default entry: sol/medium · Xiaoxin checks every task before execution"))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.orange.opacity(0.88))
         }
@@ -3215,7 +2912,7 @@ private func riskTitle(_ risk: TurnRisk) -> String {
     switch risk {
     case .green: L("Healthy")
     case .amber: L("Context is filling up")
-    case .red: L("Prepare a fresh task")
+    case .red: L("Context is highly loaded")
     }
 }
 
@@ -3223,7 +2920,7 @@ private func riskExplanation(_ risk: TurnRisk) -> String {
     switch risk {
     case .green: L("Active sessions are safe to continue.")
     case .amber: L("At least one active session needs attention.")
-    case .red: L("At least one active session should move to a fresh task.")
+    case .red: L("At least one active session has limited context headroom.")
     }
 }
 
@@ -3355,27 +3052,6 @@ private func localizedConfidence(_ confidence: String) -> String {
     case "interrupted-archived": L("Interrupted and archived")
     case "interrupted-stale-log": L("Interrupted with a stale log")
     default: confidence
-    }
-}
-
-private func localizedMigrationProgress(_ step: String) -> String {
-    switch step {
-    case "Connecting to the source task", "Connecting to Codex Desktop":
-        L("pet.handoff.connecting")
-    case "Stopping the source task's current turn":
-        L("pet.handoff.stopping")
-    case "Asking the source task for a handoff", "Asking the source task for a quality-first handoff summary":
-        L("pet.handoff.action_beam")
-    case "Preparing a local quick handoff":
-        L("pet.handoff.quick")
-    case "Creating a fresh task":
-        L("pet.handoff.creating")
-    case "Delivering the handoff to the fresh task":
-        L("pet.handoff.delivering")
-    case "Handoff complete; opening the fresh task":
-        L("pet.handoff.complete")
-    default:
-        L("pet.handoff.preparing")
     }
 }
 
