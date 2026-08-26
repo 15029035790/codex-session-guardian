@@ -166,24 +166,25 @@ public final class SessionScanner: @unchecked Sendable {
         }
     }
 
-    /// Full-history rollout evidence used only for lifecycle diagnostics. This
-    /// intentionally reads all indexed turns, including hidden subagents; the
-    /// user-facing `snapshot` continues to filter them.
+    /// Full-history lifecycle expectations used only for Hook diagnostics.
+    /// This intentionally reads all indexed turns, including hidden
+    /// subagents; the user-facing `snapshot` continues to filter them.
     public func subagentActivityEvidence(limit: Int = 10_000) throws -> (
-        latestAt: Date?,
+        latestStartAt: Date?,
+        latestStopAt: Date?,
         count: Int
     ) {
         let turns = try store.turns(limit: max(1, limit))
-        let latestAt = turns.compactMap(\.lastSubagentActivityAt).max()
-        // A turn can be persisted once before Codex supplies its turn id and
-        // again after that id arrives. Count the lifecycle evidence itself,
-        // not both SQLite identities for the same event.
-        let activityKeys = Set(turns.compactMap { turn -> String? in
-            guard let observedAt = turn.lastSubagentActivityAt else { return nil }
-            return "\(turn.sessionID):\(observedAt.timeIntervalSinceReferenceDate)"
+        let dispatches = turns.flatMap { $0.agentDispatches ?? [] }
+        let startKeys = Set(dispatches.map { dispatch in
+            "\(dispatch.callID ?? dispatch.taskName):\(dispatch.occurredAt.timeIntervalSinceReferenceDate)"
         })
-        let count = activityKeys.count
-        return (latestAt, count)
+        let latestStartAt = dispatches.map(\.occurredAt).max()
+        let latestStopAt = turns
+            .filter { $0.isSubagent == true && $0.status != .running }
+            .compactMap(\.completedAt)
+            .max()
+        return (latestStartAt, latestStopAt, startKeys.count)
     }
 
     /// Derive lifecycle Hook health from the local configuration, the
@@ -235,12 +236,12 @@ public final class SessionScanner: @unchecked Sendable {
         let start = SubagentHookHealth.evaluate(
             configuration: startConfiguration,
             latestObservationAt: latestStart,
-            latestSubagentActivityAt: activity.latestAt,
+            latestSubagentActivityAt: activity.latestStartAt,
             now: now)
         let stop = SubagentHookHealth.evaluate(
             configuration: stopConfiguration,
             latestObservationAt: latestStop,
-            latestSubagentActivityAt: activity.latestAt,
+            latestSubagentActivityAt: activity.latestStopAt,
             now: now)
         return SubagentHookHealthSnapshot(
             start: start,

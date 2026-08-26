@@ -276,7 +276,7 @@
 "Awaiting first lifecycle event" = "等待首个生命周期事件";
 "Stale" = "已失活";
 "Open Codex /hooks to review and trust both handlers. Guardian does not edit config.toml." = "请在 Codex /hooks 中检查并信任两个 handler。Guardian 不会修改 config.toml。";
-"Rollout activity was observed without a recent lifecycle event. Fully restart Codex Desktop; Guardian does not edit config.toml." = "已观察到 rollout 活动，但最近没有生命周期事件。请完整重启 Codex Desktop；Guardian 不会修改 config.toml。";
+"A newer lifecycle event did not reach Guardian. Review the relevant handler in Codex /hooks, then start one new child task to verify. Guardian does not edit config.toml." = "有更新的生命周期事件未抵达 Guardian。请在 Codex /hooks 中检查对应 handler，然后启动一个新的子任务验证；Guardian 不会修改 config.toml。";
 "Review the lifecycle handlers in Codex /hooks. Guardian does not edit config.toml." = "请在 Codex /hooks 中检查生命周期 handler。Guardian 不会修改 config.toml。";
 "Configuration reminder Hook is inactive" = "配置提醒 Hook 未生效";
 "No configuration event reached Guardian after installation. Fully restart Codex Desktop, then send one prompt; Guardian will verify the chain automatically." = "安装后没有配置事件抵达 Guardian。请完整重启 Codex Desktop，再发送一条提示词；Guardian 会自动验证链路。";

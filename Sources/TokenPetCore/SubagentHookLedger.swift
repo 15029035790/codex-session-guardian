@@ -98,7 +98,7 @@ public struct SubagentHookConfiguration: Codable, Equatable, Sendable {
 
 public struct SubagentHookHealth: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
-    public static let staleInterval: TimeInterval = 15 * 60
+    public static let lifecycleDeliveryGraceInterval: TimeInterval = 60
 
     public var schemaVersion: Int
     public var event: SubagentHookEvent
@@ -141,8 +141,7 @@ public struct SubagentHookHealth: Codable, Equatable, Sendable {
         configuration: SubagentHookConfiguration,
         latestObservationAt: Date?,
         latestSubagentActivityAt: Date?,
-        now: Date = Date(),
-        staleInterval: TimeInterval = Self.staleInterval
+        now: Date = Date()
     ) -> Self {
         let state: SubagentHookHealthState
         let reason: SubagentHookHealthReason
@@ -152,20 +151,17 @@ public struct SubagentHookHealth: Codable, Equatable, Sendable {
         } else if !configuration.trusted {
             state = .installedButUntrusted
             reason = .hookUntrusted
-        } else if let latestObservationAt {
-            if now.timeIntervalSince(latestObservationAt) > staleInterval {
-                state = .stale
-                reason = .hookInactive
-            } else {
-                state = .healthy
-                reason = .recentLifecycleEvent
-            }
         } else if let latestSubagentActivityAt,
-                  latestSubagentActivityAt >= (configuration.trustConfiguredAt ?? .distantPast) {
-            // Rollout evidence says a child activity happened, but this Hook
-            // has never delivered a lifecycle event to Guardian.
+                  latestSubagentActivityAt >= (configuration.trustConfiguredAt ?? .distantPast),
+                  latestObservationAt?.addingTimeInterval(lifecycleDeliveryGraceInterval) ?? .distantPast < latestSubagentActivityAt {
+            // A newer lifecycle event was expected, but this Hook did not
+            // reach Guardian. A completed child does not require heartbeats,
+            // so elapsed time alone must not make an old valid event stale.
             state = .stale
             reason = .hookInactive
+        } else if latestObservationAt != nil {
+            state = .healthy
+            reason = .recentLifecycleEvent
         } else {
             state = .awaitingFirstEvent
             reason = .noSubagentActivity
@@ -212,6 +208,39 @@ public struct SubagentHookHealthSnapshot: Codable, Equatable, Sendable {
         let stopNeedsAttention = stop.state == .installedButUntrusted ||
             stop.state == .stale || stop.state == .notInstalled
         return startNeedsAttention || stopNeedsAttention
+    }
+}
+
+/// Acknowledges one unchanged lifecycle-health state. A newly unhealthy state
+/// has a different fingerprint and becomes visible again.
+public struct SubagentHookHealthReminderSuppression: Equatable, Sendable {
+    public private(set) var dismissedFingerprint: String?
+
+    public init(dismissedFingerprint: String? = nil) {
+        self.dismissedFingerprint = dismissedFingerprint
+    }
+
+    public func suppresses(_ snapshot: SubagentHookHealthSnapshot) -> Bool {
+        dismissedFingerprint == Self.fingerprint(for: snapshot)
+    }
+
+    public mutating func dismiss(_ snapshot: SubagentHookHealthSnapshot) {
+        dismissedFingerprint = Self.fingerprint(for: snapshot)
+    }
+
+    public mutating func reconcile(with snapshot: SubagentHookHealthSnapshot) {
+        if dismissedFingerprint != Self.fingerprint(for: snapshot) {
+            dismissedFingerprint = nil
+        }
+    }
+
+    public static func fingerprint(for snapshot: SubagentHookHealthSnapshot) -> String {
+        [
+            snapshot.start.state.rawValue,
+            snapshot.start.reason.rawValue,
+            snapshot.stop.state.rawValue,
+            snapshot.stop.reason.rawValue,
+        ].joined(separator: ":")
     }
 }
 

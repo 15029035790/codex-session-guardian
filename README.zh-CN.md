@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-**面向 macOS 的隐私优先 Codex Token 效率管家：理解个人任务习惯，在质量不下降的前提下减少可避免消耗。**
+**macOS 上的 Codex 本地效率管家：记录真实 Token 成本，判断任务是否需要调整配置，只在你需要处理时提醒。**
 
-Codex Session Guardian 将本机 Codex 任务事实整理成个人任务经济模型、菜单栏面板和桌面悬浮宠物，目标是呈现路线基线与已验证的本地对照、解释执行消耗，并在长任务发生真实连续性损伤时及时纠偏。
+Codex Session Guardian 从本机 Codex 日志中整理会话健康、额度、模型与推理深度选择，以及多 Agent 执行情况，并通过菜单栏面板和桌面小新展示。提示词、源码、工具正文和回复不会被上传。
 
 > [!IMPORTANT]
 > 这是独立社区项目，与 OpenAI 及《蜡笔小新》的权利方没有隶属、赞助或官方合作关系。
@@ -14,13 +14,21 @@ Codex Session Guardian 将本机 Codex 任务事实整理成个人任务经济�
   <img src="Sources/TokenPet/Resources/PetAnimations/shinchan-codex-v1/guardian/frame-00.png" alt="像素小新主题" height="104">
 </p>
 
-## 产品边界
+## 它解决什么问题
 
-内部产品定义是：**越来越懂用户工作方式的 Codex 自适应执行优化器**。桌宠、多任务雷达和实时活动是低干扰入口；核心价值是为不同任务选择最低充分的模型与推理深度，判断 Token 是否换来有效产出，并发现执行过程和协作配置中的系统性浪费。
+- **跨项目会话视图**：把本地 Codex 回合归并为用户可见的任务会话。
+- **准确的 Token 口径**：使用 provider `token_count` 事实，缓存输入与新增工作分开计算。
+- **会话健康判断**：综合上下文压力、压缩、新增输入异常、额度和个人本地基线。
+- **实时任务活动**：展示真实语义阶段和最多两行公开答复；私有 reasoning 与原始工具数据不会进入界面。
+- **行动优先提醒**：只为审批、待回答问题、失败和已验证的配置异常展开小新，不把常规活动变成收件箱。
+- **执行路线证据**：把本地 `sol/medium`、`luna/max`、`terra/high` 使用方式记录为待评测候选，不视作通用答案。
+- **多 Agent 审计**：关联父任务 `spawn_agent` 与子任务 rollout，识别宽并发、全历史继承和实测 Token 消耗。
+- **Codex 自主管理接力**：用户明确操作后，小新只发送“总结必要上下文，开启新的会话任务”；摘要和目标任务由 Codex 自己负责。
+- **本地隐私**：持久化聚合事实和文件游标，不保存任务正文。
 
-冻结的产品定位和授权边界见[《小新会话管家产品宪章》](docs/PRODUCT_CONSTITUTION.md)，关键控制与观测前提见[《核心技术探针与证据账本》](docs/TECHNICAL_SPIKES.md)，个人任务地图和阶段计划见[《小新 Token 效率战略与分阶段执行计划》](docs/TOKEN_EFFICIENCY_STRATEGY.md)。总结接力是执行健康阶段的低频恢复手段，其专项机制和安全边界见[《总结接力专项决策与低 Token 架构策略》](docs/HANDOFF_STRATEGY.md)。
+它是执行优化工具，不是通用桌宠平台。宠物商城、角色生成、广泛素材格式兼容和桌面世界养成都不在当前范围，除非它们能直接改善执行质量或效率。
 
-我们不以逐项复制快速扩张的 [Awesome Codex Pet](https://github.com/legeling/awesome-codex-pet) 生态为目标。宠物商城、角色生成器、广泛素材格式兼容和桌面世界养成都属于明确非目标，除非未来能直接服务 Guardian Core。
+产品定位与证据边界见 [PRODUCT_CONSTITUTION.md](docs/PRODUCT_CONSTITUTION.md)、[TECHNICAL_SPIKES.md](docs/TECHNICAL_SPIKES.md)、[TOKEN_EFFICIENCY_STRATEGY.md](docs/TOKEN_EFFICIENCY_STRATEGY.md) 和 [HANDOFF_STRATEGY.md](docs/HANDOFF_STRATEGY.md)。
 
 ## 下载与安装
 
@@ -28,78 +36,62 @@ Codex Session Guardian 将本机 Codex 任务事实整理成个人任务经济�
 
 1. 解压 `Codex-Session-Guardian-macos-arm64.zip`。
 2. 将 **Codex Session Guardian.app** 移入 `/Applications`。
-3. 从“应用程序”启动。首次启动请按住 Control 点击应用并选择“打开”；如果仍被拦截，请前往“系统设置 → 隐私与安全性”选择“仍要打开”。
+3. 从“应用程序”启动。首次启动请按住 Control 点击应用并选择“打开”；如果仍被拦截，请前往“系统设置 → 隐私与安全性 → 仍要打开”。
 
-当前社区构建经过 ad-hoc 签名，但尚未经过 Apple 公证。你可以用[最新版 Release](https://github.com/15029035790/codex-session-guardian/releases/latest)附带的 `.sha256` 文件校验下载包。
+当前社区构建经过 ad-hoc 签名，但尚未经过 Apple 公证。可使用[最新版 Release](https://github.com/15029035790/codex-session-guardian/releases/latest)附带的 `.sha256` 文件校验压缩包。
 
-## 核心能力
-
-- **跨项目会话视图**：将本地 Codex 轮次归并为用户可见的任务会话。
-- **低干扰监控**：增量读取活跃日志，定期发现任务，无变化时不重复解析历史。
-- **会话健康判断**：综合上下文压力、压缩次数、压缩后反弹、新增输入异常和个人基线。
-- **准确的 Token 口径**：使用 provider `token_count` 事实，并单独保留缓存输入，不按文本大小估算。
-- **菜单栏额度**：常驻展示剩余额度，并按健康、关注和高风险着色。
-- **悬浮任务卡片**：展示全部进行中任务；hover 或拖拽期间，即使扫描快照短暂缺项也不会出现 2→1→2 抖动，并可从菜单栏面板随时隐藏或恢复。
-- **隐私安全的实时活动**：每个活跃卡片按 rollout 实时展示真实语义阶段、最后更新时间和最多两行公开答复；忽略私有 reasoning、工具参数与原始工具输出。
-- **行动优先提醒**：需要你批准或回答、以及任务失败时，立即展开小新悬浮任务卡并显示气泡；常规执行与完成历史不会生成收件箱。
-- **Codex 自主“总结并新开”**：用户在空闲任务上明确点击后，小新只推入“总结必要上下文，开启新的会话任务”；摘要范围、目标任务创建与后续调度都由 Codex 自己完成。
-- **两套动画主题**：舞蹈小新和像素小新可整套切换，选择会持久化。
-- **有状态的小新性格**：根据工作、多任务、刷新、风险、交接、完成、Hover、拖拽和双击说不同台词，提供关闭、轻量和活跃三档，默认轻量。
-- **本地隐私**：只保存 Token 事实和文件游标，不保存提示词、回复、源码或工具正文。
-- **中文优先**：默认和兜底语言均为简体中文；仅在 macOS 明确首选英文时使用英文候选支持，不使用时区判断。
-
-## 系统要求
+### 系统要求
 
 - macOS 14+
 - Apple Silicon
 - Codex Desktop 或 `~/.codex` 下的 Codex 会话日志
 - SQLite 3
 
-## 从源码构建
+## 当前关键行为
 
-从源码构建还需要 Swift 6.2；只有重新生成像素主题时才需要 `ffmpeg`。
+### 子 Agent 生命周期健康
+
+Guardian 可以安装纯观察型 `SubagentStart` 和 `SubagentStop` handler。它们不会阻断、修改或启动任务。健康状态取决于“预期生命周期事件是否抵达”，而不是固定心跳超时：
+
+- start 已送达后，子任务长期运行仍保持健康；
+- 子任务完成前不会要求 stop 事件；
+- rollout 出现更新的生命周期事实、但对应 Hook 未抵达时，才判定为失活；
+- 点击“知道了”会按当前状态指纹隐藏一次提醒，健康状态变化后会重新出现。
+
+Guardian 通过 Codex `hooks/list` 区分未安装、未信任、没有子任务活动，以及真实生命周期事件未送达。它不会修改 `config.toml`，也不会伪造信任状态。
+
+### 低干扰多 Agent 诊断
+
+本地影子审计会保留完整 provider 用量用于诊断。若单一有界子任务的消耗主要来自缓存输入，只进入任务后复盘，不弹出运行中提醒。运行中的高 Token 卡片还要求至少达到 **1M 未缓存 provider Token**（`新增输入 + 输出 + reasoning 输出`）。Guardian 不会自动打断任务，也不会自动修改 Agent、模型或 effort。
+
+### 隐私安全的实时界面
+
+菜单栏展示额度和本地聚合证据。悬浮卡展示当前任务状态，在 hover 和拖拽期间保持稳定，并可随时隐藏或恢复。实时读取会忽略 reasoning、命令正文、工具参数、原始工具输出、stdout 和 stderr。
+
+## 构建与测试
+
+源码构建需要 Swift 6.2；只有重新生成可选像素小新主题时才需要 `ffmpeg`。
 
 ```bash
 swift build
 .build/debug/CodexSessionGuardian
 ```
 
-执行测试：
+运行可执行测试集：
 
 ```bash
-.build/debug/codex-session-guardian-tests
+swift run --disable-sandbox codex-session-guardian-tests
 ```
 
-查看只含本地聚合数据的接力影子报告：
+生成经过优化和 ad-hoc 签名的应用包：
 
 ```bash
-.build/debug/codex-session-guardian-cli --shadow-report
+scripts/package-app.sh dist/Codex-Session-Guardian.app
 ```
 
-对最近 90 天的本地任务执行隐私安全的模型、推理深度与 Token 配置盘点：
+## Hook 安装
 
-```bash
-.build/debug/codex-session-guardian-cli --token-audit --token-audit-days 90
-```
-
-该报告只输出聚合配置、行为任务形态、验证成功计数、个人路线覆盖和 provider Token，不输出任务标题、路径、提示词、命令正文、工具原始输出或回复。任务路线尚未分类时不会生成替代模型或 effort。
-
-可以保存并查看“控制器 + 两类执行器”的当前使用习惯：
-
-```bash
-.build/debug/codex-session-guardian-cli --set-routing-profile current-habits
-.build/debug/codex-session-guardian-cli --routing-profile
-```
-
-也可以把任务是否冻结、能否机械验收、是否判断密集和权限边界写入本地 JSON，运行声明策略的影子决策：
-
-```bash
-.build/debug/codex-session-guardian-cli --route-task-contract /path/to/task-contract.json
-```
-
-该输出用于解释 `codex-quota-router` 会如何分流，不代表模型配置已经被 Token/质量对照验证为最优。
-
-生产包内置提交前配置预检 hook。它只在高置信度配置不匹配时阻止消息进入模型，并给出建议配置；低置信度、读取失败、超时或协议变化都直接放行。安装器会先备份 `~/.codex/hooks.json`，保留其他 hook，并且不会替用户伪造 Codex 信任状态：
+安装同步执行的路线预检 handler：
 
 ```bash
 "outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
@@ -108,80 +100,109 @@ swift build
   --hooks-file "$HOME/.codex/hooks.json"
 ```
 
-安装或升级 handler 后，在 Codex CLI 中打开 `/hooks` 审核并信任新命令。可用 `--routing-preflights --limit 20` 查看不含提示词的本地判定账本；模型兜底发生时，账本还会记录其 provider Token，便于判断预检本身是否值得。
-
-小新还可以安装纯观察型 `SubagentStart` 和 `SubagentStop` handler。它们不会阻断、修改或启动任务。账本只保存父任务、回合、子 Agent 的不可逆哈希，生命周期时间、Agent 类型、模型、权限模式、路径是否存在和输入字段名；不保存项目路径、transcript 路径、提示词、最终答复或原始 ID：
+安装纯观察型子任务生命周期 handler：
 
 ```bash
 "outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
   --install-subagent-hooks \
   --hook-command "$PWD/outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
   --hooks-file "$HOME/.codex/hooks.json"
-
-"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
-  --subagent-hook-diagnostics --limit 100
 ```
 
-安装后需完整重启一次 Codex Desktop，让后续任务加载新的 Hook 快照。当前 Hook 输入不提供 `fork_turns`；诊断时会把生命周期账本与父任务 rollout 中的 `spawn_agent` 记录关联，不会虚构上下文继承方式。
+随后在 Codex CLI `/hooks` 中审核并信任这些 handler。安装或修改后完整重启一次 Codex Desktop，使新任务载入最新 Hook 快照。当前 Hook 输入不包含 `fork_turns`；Guardian 会关联生命周期账本和父任务 rollout，不会虚构该值。
 
-小新会通过 Codex `hooks/list` 检查两个 handler 的实际启用与信任状态，并把“没有子 Agent 活动”“尚未信任”和“已有 rollout 活动但 Hook 未送达”分开记录。异常只在小新悬浮提醒中出现；子 Agent 仍不会进入菜单栏会话列表。可运行 `--subagent-hook-health` 查看脱敏健康账本。
-
-默认入口是 `sol/medium`。小新只针对已经到来的当前任务判断是否应该升档或降档，不预测用户的下一项任务；`terra/high` 只用于已经冻结、跨模块且判断密集，并有证据表明低配置会显著增加返工风险的实现任务。配置不匹配时，小新悬浮卡会在任务执行前自动展开，显示当前配置、建议配置和原因；“切换配置并继续”只为该任务覆盖 model/effort 并重放被阻断的消息，“按原配置继续”则不改配置直接重放。原始消息仅通过权限为 `0600` 的本机 socket 暂存在小新内存，不写入 SQLite，重放或重启后立即清除。真实复验已确认切换后的新回合 `turn_context` 与用户确认的 model/effort 一致；任务结束后旧阻断卡会自动淘汰。任务结束后，小新先判断质量证据，再比较 provider Token 和耗时：只有完成但没有验证不能算质量通过。
-
-受控对照可写入脱敏的本地评测账本，并随时读回：
+常用诊断命令：
 
 ```bash
-.build/debug/codex-session-guardian-cli --record-routing-evaluation /path/to/sample.json
-.build/debug/codex-session-guardian-cli --routing-evaluations --limit 20
-.build/debug/codex-session-guardian-cli --routing-outcomes --limit 20
-.build/debug/codex-session-guardian-cli --routing-evaluation-summary --baseline-effort max --candidate-effort xhigh
+.build/debug/codex-session-guardian-cli --routing-hook-diagnostics
+.build/debug/codex-session-guardian-cli --subagent-hook-diagnostics --limit 100
+.build/debug/codex-session-guardian-cli --subagent-hook-health
 ```
 
-该配置只把 `sol/medium`、`luna/max`、`terra/high` 记录为待评测的习惯基线，不把它们视为正确答案。报告同时输出官方模型角色和 effort 对照项；其他用户不会被自动套用这份习惯。
+## 本地审计
 
-执行浪费归因 v1 只运行影子账本，不产生提醒或自动干预。它保守记录完全相同的重复读取、明确失败后的原样重试，以及超过字节阈值的工具输出；可只查看有证据的匿名记录：
+以下报告均只在本机运行，并且只输出聚合事实：
 
 ```bash
+# 模型、effort、任务形态、验证与 provider Token 盘点
+.build/debug/codex-session-guardian-cli --token-audit --token-audit-days 90
+
+# 父子任务执行策略与 Token 诊断
+swift run --disable-sandbox codex-session-guardian-cli \
+  --multi-agent-audit --multi-agent-audit-days 7 --limit 10000
+
+# 总结接力影子决策
+.build/debug/codex-session-guardian-cli --shadow-report
+
+# 带证据的执行浪费观测
 .build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
 .build/debug/codex-session-guardian-cli --execution-waste-review --only-unlabeled --limit 20
-.build/debug/codex-session-guardian-cli --label-execution-waste OBSERVATION_SHA256 --reason repeated_read --verdict confirmed_waste --rationale confirmed_redundant
 .build/debug/codex-session-guardian-cli --execution-waste-accuracy
 ```
 
-标签按匿名 observation 和浪费类别分别记录：`confirmed_waste` 使用 `confirmed_redundant`；`justified` 使用 `intentional_recheck`、`necessary_recovery`、`necessary_evidence` 或 `detector_mismatch`；`unclear` 使用 `insufficient_context`。不支持自由文本。账本最多保留 2,000 个终态回合，只包含哈希、计数、事件序号、实测输出字节、provider Token 分类、质量状态和固定标签，不保存会话/回合 ID、路径、提示词、命令、工具参数或工具输出。
-
-生成经过优化和 ad-hoc 签名的应用包：
+查看某个明确任务合同的声明式路线判断：
 
 ```bash
-scripts/package-app.sh dist/Codex-Session-Guardian.app
+.build/debug/codex-session-guardian-cli --set-routing-profile current-habits
+.build/debug/codex-session-guardian-cli --routing-profile
+.build/debug/codex-session-guardian-cli --route-task-contract /path/to/task-contract.json
 ```
+
+这些输出用于解释本地习惯和评测候选，不能证明某个配置对另一任务或另一用户最优。
+
+## 工作原理
+
+```text
+~/.codex rollout 日志 + state_5.sqlite
+                       │
+                       ▼
+               本地增量扫描器
+                       │
+             ┌─────────┴─────────┐
+             ▼                   ▼
+      SQLite 聚合事实        内存实时 tail
+             │                   │
+             └─────────┬─────────┘
+                       ▼
+                策略与证据模型
+                       │
+             ┌─────────┴─────────┐
+             ▼                   ▼
+          菜单栏面板          悬浮小新
+```
+
+扫描器按完整 JSONL 记录增量读取，只保存派生用量事实和安全文件游标。实时 tail 负责活跃任务的界面更新，公开答复预览也不会持久化。
 
 ## 数据与隐私
 
-应用只读访问：
+Guardian 读取：
 
 - `~/.codex/sessions/**/*.jsonl`
 - `~/.codex/archived_sessions/**/*.jsonl`
 - `~/.codex/state_5.sqlite`
 - `~/.codex/session_index.jsonl`
 
-本地索引继续写入兼容旧版本的数据目录：
+本地索引位于：
 
 ```text
 ~/Library/Application Support/TokenPet/token-pet.sqlite
 ```
 
-正常监控不会上传会话数据。实时活动仅在内存中保留每个会话的当前状态和公开输出短摘要，不写入 Guardian SQLite；私有 reasoning、完整工具参数、原始工具输出、stdout 和 stderr 不会进入实时 UI 状态。接力影子观测只保存版本化数值特征、枚举原因码、任务/回合 ID 和 provider Token 分类，不保存标题、工作目录、提示词、回复或交接正文，并限制为最近 2,000 条决策和 200 次接力。素材导入脚本只有在用户手动运行时才会下载经过 SHA-256 固定的公开图集。
+正常监控不依赖网络，也不会上传会话数据。持久化账本有数量上限，只包含派生计数、时间戳、枚举、哈希、provider Token 分类和固定复核标签；不包含标题、工作目录、提示词、回复、源码、命令正文、工具参数或原始工具输出。安全报告和隐私策略见 [SECURITY.md](SECURITY.md)。
 
-“总结并新开”只在用户明确操作且任务空闲后，通过本机 Codex Desktop owner 进程发送固定指令；小新不会自动归档、删除、总结、注入或创建任务。新任务是否创建和可继续由 Codex 自己负责，需由用户确认。
+## 主题与许可
 
-## 素材和许可
+仓库包含两套受《蜡笔小新》启发的同人动画，它们与软件采用不同许可。可选导入脚本仅在用户手动运行时下载经过固定的公开图集，并校验 SHA-256：
+
+```bash
+scripts/import-shinchan-codex-pet.sh
+```
 
 - 代码与文档：[MIT License](LICENSE)
-- 角色图片和动画素材：仅限个人、非商业同人使用，详见 [ASSETS_LICENSE.md](ASSETS_LICENSE.md)
+- 角色图片与动画素材：仅限个人、非商业同人使用，详见 [ASSETS_LICENSE.md](ASSETS_LICENSE.md)
 
-因此本仓库采用**混合许可**：软件代码是开源软件，角色素材不是 OSI 定义下的开源内容。
+因此本仓库采用**混合许可**：软件是开源软件，但附带角色素材不属于 OSI 定义下的开源内容。
 
 ## 贡献
 
-欢迎提交问题和范围明确的 Pull Request。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎提交范围明确的问题和 Pull Request。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。

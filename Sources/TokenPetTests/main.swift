@@ -1143,6 +1143,24 @@ func testMultiAgentExecutionAudit() throws {
         true,
         "bounded context without token burn stays quiet")
 
+    child.status = .running
+    child.usage = TokenUsage(raw: [
+        "input_tokens": 25_431_909,
+        "cached_input_tokens": 24_744_192,
+        "output_tokens": 46_601,
+        "reasoning_output_tokens": 14_822,
+        "total_tokens": 25_478_510,
+    ])
+    let cacheDominatedFindings = MultiAgentAuditPolicy.evaluate(turns: [parent, child])
+    try expect(
+        cacheDominatedFindings.map(\.reason),
+        [.largeTokenBurn],
+        "cache-dominated high usage remains available for postflight review")
+    try expect(
+        cacheDominatedFindings.map(\.severity),
+        [.reviewAfterCompletion],
+        "cache-dominated bounded work does not interrupt with a runtime observation")
+
     var parsed = RolloutState()
     _ = parsed.process(line: event(type: "session_meta", payload: ["id": "parser-parent", "cwd": "/project"]))
     _ = parsed.process(line: event(type: "event_msg", payload: ["type": "task_started", "turn_id": "turn"]))
@@ -1440,6 +1458,47 @@ func testSubagentHookHealthAndTrustInspection() throws {
         latestSubagentActivityAt: now.addingTimeInterval(5),
         now: now.addingTimeInterval(10))
     try expect(stopHealthy.state, .healthy, "recent lifecycle event is healthy")
+
+    let trustedStart = SubagentHookConfiguration(
+        event: .start,
+        installed: true,
+        enabled: true,
+        trusted: true,
+        trustStatus: "trusted",
+        command: command,
+        currentHash: "sha256:start",
+        configSectionFound: true,
+        trustConfiguredAt: now,
+        inspectedAt: now)
+    let longRunningStart = SubagentHookHealth.evaluate(
+        configuration: trustedStart,
+        latestObservationAt: now.addingTimeInterval(8),
+        latestSubagentActivityAt: now.addingTimeInterval(5),
+        now: now.addingTimeInterval(7_200))
+    try expect(longRunningStart.state, .healthy, "a delivered start event does not need a heartbeat")
+
+    let missingLaterStart = SubagentHookHealth.evaluate(
+        configuration: trustedStart,
+        latestObservationAt: now,
+        latestSubagentActivityAt: now.addingTimeInterval(120),
+        now: now.addingTimeInterval(125))
+    try expect(missingLaterStart.state, .stale, "a newer expected start without Hook delivery is stale")
+
+    let healthySnapshot = SubagentHookHealthSnapshot(
+        start: longRunningStart,
+        stop: stopHealthy,
+        subagentActivityCount: 1,
+        observedAt: now)
+    var suppression = SubagentHookHealthReminderSuppression()
+    suppression.dismiss(healthySnapshot)
+    try expect(suppression.suppresses(healthySnapshot), true, "an unchanged Hook reminder can be dismissed")
+    let changedSnapshot = SubagentHookHealthSnapshot(
+        start: missingLaterStart,
+        stop: stopHealthy,
+        subagentActivityCount: 2,
+        observedAt: now.addingTimeInterval(125))
+    suppression.reconcile(with: changedSnapshot)
+    try expect(suppression.suppresses(changedSnapshot), false, "a changed Hook problem becomes visible again")
 }
 
 func testSubagentHookHealthWithRolloutActivity() throws {
@@ -1489,7 +1548,7 @@ func testSubagentHookHealthWithRolloutActivity() throws {
     try expect(snapshot.subagentActivityCount, 1, "rollout subagent activity is counted")
     try expect(snapshot.start.state, .stale, "zero start Hook events with rollout activity is stale")
     try expect(snapshot.start.reason, .hookInactive, "rollout activity distinguishes inactive Hook")
-    try expect(snapshot.stop.state, .stale, "zero stop Hook events with rollout activity is stale")
+    try expect(snapshot.stop.state, .awaitingFirstEvent, "a running child does not yet require a stop Hook event")
     try store.recordSubagentHookHealthDiagnostic(SubagentHookHealthDiagnostic(snapshot: snapshot))
     try expect(
         try store.subagentHookHealthDiagnostics(limit: 1).first?.snapshot,

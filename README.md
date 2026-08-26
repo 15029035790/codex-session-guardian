@@ -2,9 +2,9 @@
 
 [简体中文](README.zh-CN.md)
 
-**A privacy-first macOS Token efficiency guardian for Codex that learns personal task patterns and reduces avoidable usage without lowering task quality.**
+**A privacy-first macOS companion that helps Codex use the lowest sufficient execution configuration, explains local Token cost, and surfaces only actionable session problems.**
 
-Codex Session Guardian turns local Codex task telemetry into a personal task-economics model, a lightweight menu bar dashboard, and an animated desktop companion. Its goal is to recommend the lowest sufficient model configuration, explain execution cost, and intervene only when a long task shows real continuity damage.
+Codex Session Guardian turns local Codex telemetry into a menu bar dashboard and a small desktop companion, Xiaoxin. It observes task health, quota, model/effort choices, and multi-agent execution without uploading prompts, source code, tool payloads, or responses.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not affiliated with, endorsed by, or sponsored by OpenAI or the owners of Crayon Shin-chan.
@@ -14,60 +14,63 @@ Codex Session Guardian turns local Codex task telemetry into a personal task-eco
   <img src="Sources/TokenPet/Resources/PetAnimations/shinchan-codex-v1/guardian/frame-00.png" alt="Pixel Shin-chan theme" height="104">
 </p>
 
-## Product boundary
+## What it does
 
-Internally, Session Guardian is **an adaptive Codex execution optimizer that learns how its user works**. The pet, multi-task radar, and live activity are low-interference surfaces; the core value is choosing the lowest sufficient model and reasoning effort, checking whether Token usage produces verified results, and finding systemic waste in execution and collaboration configuration.
+- **Global session view** — groups local Codex turns into user-facing sessions across projects.
+- **Accurate Token accounting** — uses provider `token_count` facts and keeps cached input separate from fresh work.
+- **Session health** — combines context pressure, compaction, fresh-input anomalies, quota, and local calibration.
+- **Live task activity** — shows semantic task stages and at most two lines of public assistant output; private reasoning and raw tool data are excluded.
+- **Action-first attention** — expands Xiaoxin for approvals, unanswered questions, failures, and verified configuration problems instead of turning routine activity into an inbox.
+- **Execution routing evidence** — records local `sol/medium`, `luna/max`, and `terra/high` habits as evaluation candidates, never as universal recommendations.
+- **Multi-agent audit** — correlates parent `spawn_agent` calls with child rollouts and reports broad fan-out, full-history inheritance, and measured Token burn.
+- **Codex-managed handoff** — on explicit user action, sends only “Summarize the necessary context and start a new task.” Codex owns the summary and destination task.
+- **Local by design** — persists aggregate facts and cursors, not task content.
 
-See the Chinese-first [Token efficiency strategy and phased execution plan](docs/TOKEN_EFFICIENCY_STRATEGY.md) for the product north star and stage gates. Handoff is a low-frequency recovery mechanism within execution health; its protocol and safety constraints remain in the [handoff-specific strategy](docs/HANDOFF_STRATEGY.md).
+The product is an adaptive execution optimizer, not a general desktop-pet platform. Pet stores, character generation, broad spritesheet compatibility, and desktop-world progression are out of scope unless they directly improve execution quality or efficiency.
 
-It does not aim to mirror every feature in the fast-growing [Awesome Codex Pet](https://github.com/legeling/awesome-codex-pet) ecosystem. Pet stores, character generators, broad spritesheet compatibility, and desktop-world progression are explicit non-goals unless they later support the Guardian core.
+Product and evidence boundaries are documented in [PRODUCT_CONSTITUTION.md](docs/PRODUCT_CONSTITUTION.md), [TECHNICAL_SPIKES.md](docs/TECHNICAL_SPIKES.md), [TOKEN_EFFICIENCY_STRATEGY.md](docs/TOKEN_EFFICIENCY_STRATEGY.md), and [HANDOFF_STRATEGY.md](docs/HANDOFF_STRATEGY.md).
 
-## Download
+## Download and install
 
-[**Download the latest macOS app (Apple Silicon)**](https://github.com/15029035790/codex-session-guardian/releases/latest/download/Codex-Session-Guardian-macos-arm64.zip)
+[**Download the latest macOS build for Apple Silicon**](https://github.com/15029035790/codex-session-guardian/releases/latest/download/Codex-Session-Guardian-macos-arm64.zip)
 
 1. Unzip `Codex-Session-Guardian-macos-arm64.zip`.
 2. Move **Codex Session Guardian.app** to `/Applications`.
-3. Launch it from Applications. On the first launch, Control-click the app and choose **Open**. If macOS still blocks it, go to **System Settings → Privacy & Security** and choose **Open Anyway**.
+3. Launch it from Applications. On first launch, Control-click the app and choose **Open**. If macOS still blocks it, use **System Settings → Privacy & Security → Open Anyway**.
 
-The current community build is ad-hoc signed but not Apple-notarized. You can compare its SHA-256 digest with the `.sha256` file attached to the [latest release](https://github.com/15029035790/codex-session-guardian/releases/latest).
+The community build is ad-hoc signed and not Apple-notarized. Verify the archive against the `.sha256` file attached to the [latest release](https://github.com/15029035790/codex-session-guardian/releases/latest).
 
-## Why it exists
-
-Long Codex tasks can remain technically active while their context becomes expensive, repeatedly compacted, or difficult to resume safely. Raw token totals alone do not explain that risk. Session Guardian prioritizes the signals that change your next decision:
-
-- context pressure for the latest user-visible turn;
-- compaction count and post-compaction rebound;
-- fresh input versus your local historical baseline;
-- shared Codex quota and reset time;
-- whether to continue, watch, or start a fresh task.
-
-## Features
-
-- **Global session view** — groups local Codex turns into user-facing sessions across projects.
-- **Low-interference monitoring** — tails active logs, discovers sessions periodically, and skips unchanged history.
-- **Session health model** — combines context pressure, compaction, fresh-input anomalies, and local calibration.
-- **Accurate token semantics** — keeps cached input separate and uses provider `token_count` facts instead of estimating from text size.
-- **Menu bar quota** — shows remaining quota at a glance with healthy, caution, and critical colors.
-- **Floating active-session cards** — displays the latest state of every active task, keeps the card set stable while hovering or dragging, and can be hidden or restored from the menu bar panel.
-- **Private live activity** — updates each active card from its rollout stream with a real semantic stage, last-update time, and at most two lines of public assistant output; reasoning, tool arguments, and raw tool output are ignored.
-- **Action-first attention** — waits for your approval or answer and task failures immediately expand the floating Xiaoxin card and show a speech bubble; routine activity and completion history do not create an inbox.
-- **Codex-managed fresh-task handoff** — when the user explicitly acts on an idle task, Guardian sends only “Summarize the necessary context and start a new task.” Codex itself decides the summary and creates the destination task.
-- **Two animation sets** — switches between Dance Shin-chan and Pixel Shin-chan, with the selected set persisted locally.
-- **State-aware Shin-chan personality** — adds Chinese-first quips for work, multitasking, refreshes, risk, handoff, completion, hover, drag, and double-click interactions, with off, light, and active intensity levels.
-- **Local by design** — stores token facts and file cursors, not prompts, responses, source code, or tool payloads.
-- **Chinese-first UI** — uses Simplified Chinese by default, with optional English support when macOS explicitly prefers English.
-
-## System requirements
+### Requirements
 
 - macOS 14 or later
 - Apple Silicon
 - Codex Desktop or Codex session logs under `~/.codex`
 - SQLite 3
 
-## Build from source
+## Current behavior that matters
 
-Building from source additionally requires the Swift 6.2 toolchain. `ffmpeg` is needed only when regenerating the optional Pixel Shin-chan theme.
+### Subagent lifecycle health
+
+Guardian can install observation-only `SubagentStart` and `SubagentStop` handlers. They never block, modify, or start a task. Health is based on whether an expected lifecycle event reached Guardian, not on a heartbeat timeout:
+
+- a delivered start remains healthy while a child task runs;
+- a stop event is not expected until that child finishes;
+- a newer rollout lifecycle event without the corresponding Hook delivery is reported as inactive;
+- **Got it** suppresses one unchanged warning fingerprint, while a changed health state becomes visible again.
+
+Guardian uses Codex `hooks/list` to distinguish missing configuration, untrusted handlers, the absence of child activity, and a lifecycle event that failed to arrive. It does not edit `config.toml` or fabricate trust state.
+
+### Low-noise multi-agent findings
+
+The local shadow audit retains full provider usage for diagnosis. A bounded child whose usage is dominated by cached input stays in postflight review instead of raising a running card. A running large-Token warning additionally requires at least **1M non-cached provider tokens** (`fresh input + output + reasoning output`). Guardian never interrupts a task or changes an Agent, model, or effort automatically.
+
+### Privacy-safe live UI
+
+The menu bar reports quota and local aggregate evidence. Floating cards show current session state, stay stable during hover and drag, and can be hidden or restored. The live tailer ignores reasoning, command bodies, tool arguments, raw tool output, stdout, and stderr.
+
+## Build and test
+
+Building from source requires the Swift 6.2 toolchain. `ffmpeg` is needed only when regenerating the optional Pixel Shin-chan theme.
 
 ```bash
 swift build
@@ -77,39 +80,18 @@ swift build
 Run the executable test suite:
 
 ```bash
-.build/debug/codex-session-guardian-tests
+swift run --disable-sandbox codex-session-guardian-tests
 ```
 
-Inspect the local, aggregate-only handoff shadow report:
+Create an optimized, ad-hoc signed app bundle:
 
 ```bash
-.build/debug/codex-session-guardian-cli --shadow-report
+scripts/package-app.sh dist/Codex-Session-Guardian.app
 ```
 
-Run a privacy-safe model, reasoning-effort, behavioral task-shape, validation-signal, and Token audit over the last 90 days:
+## Hook setup
 
-```bash
-.build/debug/codex-session-guardian-cli --token-audit --token-audit-days 90
-```
-
-The aggregate report excludes titles, paths, prompts, command bodies, raw tool output, and replies. It reports observed-habit coverage and official evaluation candidates; a habit is never treated as a recommendation.
-
-Persist and inspect the current controller-worker habits as an evaluation baseline:
-
-```bash
-.build/debug/codex-session-guardian-cli --set-routing-profile current-habits
-.build/debug/codex-session-guardian-cli --routing-profile
-```
-
-Run the locally declared routing policy against an explicit task contract:
-
-```bash
-.build/debug/codex-session-guardian-cli --route-task-contract /path/to/task-contract.json
-```
-
-The result explains how `codex-quota-router` would route the task and remains marked as unvalidated until representative quality/Token evaluations pass.
-
-The production bundle contains a synchronous configuration preflight hook. It blocks only high-confidence route mismatches and recommends the sufficient route; uncertainty, schema drift, timeout, or classifier failure all fail open. The installer backs up `~/.codex/hooks.json`, preserves existing handlers, and never fabricates Codex trust state:
+Install the synchronous routing preflight handler:
 
 ```bash
 "outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
@@ -118,125 +100,109 @@ The production bundle contains a synchronous configuration preflight hook. It bl
   --hooks-file "$HOME/.codex/hooks.json"
 ```
 
-After installing or changing the handler, review and trust it from `/hooks` in the Codex CLI. Use `--routing-preflights --limit 20` to inspect the prompt-free local decision ledger; model fallbacks also record their provider Token usage so preflight overhead remains measurable.
-
-Guardian can also install observation-only `SubagentStart` and `SubagentStop` handlers. They never block, modify, or start a task. The ledger stores only opaque parent/turn/agent hashes, lifecycle time, agent type, model, permission mode, path-presence flags, and input field names; it never stores cwd, transcript paths, prompts, final messages, or raw IDs:
+Install observation-only child lifecycle handlers:
 
 ```bash
 "outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
   --install-subagent-hooks \
   --hook-command "$PWD/outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
   --hooks-file "$HOME/.codex/hooks.json"
-
-"outputs/installed/Codex Session Guardian.app/Contents/Helpers/codex-session-guardian-cli" \
-  --subagent-hook-diagnostics --limit 100
 ```
 
-Restart Codex Desktop once after installation so new tasks use the updated Hook snapshot. The current Hook payload does not expose `fork_turns`; diagnosis correlates this lifecycle ledger with the parent rollout's `spawn_agent` record instead of inventing an inheritance value.
+Then review and trust the handlers in Codex CLI `/hooks`. Restart Codex Desktop once after installing or changing them so new tasks load the updated Hook snapshot. The current Hook payload does not expose `fork_turns`; Guardian correlates the lifecycle ledger with the parent rollout rather than inventing that value.
 
-Guardian uses Codex `hooks/list` to distinguish no subagent activity from untrusted handlers and from rollout activity whose lifecycle Hook never arrived. Degraded health appears only on the floating guardian surface; subagent tasks remain absent from the menu-bar session list. Use `--subagent-hook-health` for the privacy-safe health ledger.
-
-Guardian v0.3 also checks whether the installed handler has delivered any event after installation. If Codex Desktop keeps using its pre-install Hook snapshot, Xiaoxin shows a chain-health warning and asks for one full Desktop restart plus a verification prompt; this is distinct from a clean “configuration is appropriate” result.
-
-The local execution-strategy shadow ledger correlates parent `spawn_agent` calls with child rollouts. It flags full-history inheritance, broad concurrent fan-out, and large provider-token burn. A running finding may produce one dismissible observation card; it never offers interruption or changes an Agent/model configuration. Completed findings remain only in the local diagnostic ledger rather than occupying the menu bar. For local diagnosis:
+Useful diagnostics:
 
 ```bash
+.build/debug/codex-session-guardian-cli --routing-hook-diagnostics
+.build/debug/codex-session-guardian-cli --subagent-hook-diagnostics --limit 100
+.build/debug/codex-session-guardian-cli --subagent-hook-health
+```
+
+## Local audits
+
+All reports below are local and aggregate-only:
+
+```bash
+# Model, effort, task-shape, validation, and provider-Token audit
+.build/debug/codex-session-guardian-cli --token-audit --token-audit-days 90
+
+# Parent/child execution strategy and Token findings
 swift run --disable-sandbox codex-session-guardian-cli \
   --multi-agent-audit --multi-agent-audit-days 7 --limit 10000
-```
 
-The default entry route is `sol/medium`. `terra/high` is reserved for a frozen, judgment-dense cross-module implementation with evidence that a lower-capability worker would materially increase repair risk; it is never the general default. On a mismatch, Xiaoxin opens a floating confirmation card before execution with the current route, suggested route, and reason. “Switch configuration & continue” overrides model and effort for that task and replays only the blocked message; “Continue with original configuration” replays it without changing the route. The message crosses a user-only (`0600`) local Unix socket and remains in GUI memory; it is never stored in SQLite and disappears after replay or restart. After a turn finishes, Xiaoxin evaluates quality evidence before comparing provider Token and duration: completion without verification is never treated as quality success. The menu bar only reports route baselines and measured comparisons; it does not infer a configuration for an unknown future task.
+# Handoff shadow decisions
+.build/debug/codex-session-guardian-cli --shadow-report
 
-Store and inspect privacy-bounded controlled evaluation samples locally:
-
-```bash
-.build/debug/codex-session-guardian-cli --record-routing-evaluation /path/to/sample.json
-.build/debug/codex-session-guardian-cli --routing-evaluations --limit 20
-.build/debug/codex-session-guardian-cli --routing-outcomes --limit 20
-.build/debug/codex-session-guardian-cli --routing-evaluation-summary --baseline-effort max --candidate-effort xhigh
-```
-
-This records `sol/medium`, `luna/max`, and `terra/high` as unvalidated habits, not correct routes. The audit separately reports official model roles and effort comparisons, and never applies these habits to another user.
-
-Execution-waste attribution v1 is a shadow ledger: it emits no per-task alerts and takes no automatic action. The menu panel shows aggregate calibration progress. It conservatively records exact repeated reads, exact retries after explicit failures, and measured tool outputs above fixed byte thresholds. Inspect only anonymous observations with evidence:
-
-```bash
+# Evidence-backed execution-waste observations
 .build/debug/codex-session-guardian-cli --execution-waste --only-with-evidence --limit 20
 .build/debug/codex-session-guardian-cli --execution-waste-review --only-unlabeled --limit 20
-.build/debug/codex-session-guardian-cli --label-execution-waste OBSERVATION_SHA256 --reason repeated_read --verdict confirmed_waste --rationale confirmed_redundant
 .build/debug/codex-session-guardian-cli --execution-waste-accuracy
 ```
 
-Labels are per anonymous observation and reason. Use `confirmed_redundant` with `confirmed_waste`; use `intentional_recheck`, `necessary_recovery`, `necessary_evidence`, or `detector_mismatch` with `justified`; and use `insufficient_context` with `unclear`. Free-form notes are intentionally unsupported. The ledger retains at most 2,000 terminal turns and stores only hashes, counts, event positions, measured output bytes, provider Token categories, quality state, and fixed review labels. It excludes session/turn IDs, paths, prompts, commands, tool arguments, and tool output.
-
-Create an optimized, ad-hoc signed app bundle:
+To inspect the declared routing policy for a specific task contract:
 
 ```bash
-scripts/package-app.sh dist/Codex-Session-Guardian.app
+.build/debug/codex-session-guardian-cli --set-routing-profile current-habits
+.build/debug/codex-session-guardian-cli --routing-profile
+.build/debug/codex-session-guardian-cli --route-task-contract /path/to/task-contract.json
 ```
+
+These outputs explain recorded habits and evaluation candidates. They do not prove that a configuration is optimal for another task or user.
 
 ## How it works
 
 ```text
-~/.codex session logs + state_5.sqlite
-                  │
-                  ▼
-       incremental local scanner
-                  │
-                  ▼
-   per-turn facts → session aggregation
-                  │
-                  ▼
- health policy + quota + activity state
-          │                     │
-          ▼                     ▼
-  menu bar dashboard     floating guardian
+~/.codex rollout logs + state_5.sqlite
+                    │
+                    ▼
+         incremental local scanner
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+  aggregate SQLite facts   in-memory live tail
+          │                   │
+          └─────────┬─────────┘
+                    ▼
+       policy and evidence models
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+   menu bar dashboard   floating Xiaoxin
 ```
 
-The scanner reads local rollout JSONL files incrementally and records only derived usage facts and cursors in SQLite. A separate in-memory tailer follows active sessions at 200 ms cadence for UI activity updates; public-output previews are not persisted. The UI presents one latest turn per session while recent turns remain background evidence for health calibration.
+The scanner reads complete JSONL records incrementally and stores derived usage facts plus safe file cursors. The live tailer follows active sessions for UI updates without persisting public-output previews.
 
 ## Data and privacy
 
-Session Guardian reads:
+Guardian reads:
 
 - `~/.codex/sessions/**/*.jsonl`
 - `~/.codex/archived_sessions/**/*.jsonl`
 - `~/.codex/state_5.sqlite`
 - `~/.codex/session_index.jsonl`
 
-It writes its local index to the legacy-compatible directory:
+Its local index is stored at:
 
 ```text
 ~/Library/Application Support/TokenPet/token-pet.sqlite
 ```
 
-The app does not upload session data. Network access is not part of normal monitoring. Live cards read only normalized event types and public assistant output; private reasoning, full tool arguments, raw tool output, stdout, and stderr are never placed into live UI state. Handoff shadow telemetry stores only versioned numeric features, enum reason codes, task/turn identifiers, and exact provider token categories; it excludes titles, working directories, prompts, replies, and handoff bodies, and is bounded to 2,000 decisions and 200 handoffs. The theme import script downloads a pinned public spritesheet only when you run that script manually.
+Normal monitoring has no network dependency and does not upload session data. Persistent ledgers are bounded and contain derived counts, timestamps, enums, hashes, provider Token categories, and fixed review labels. They exclude titles, working directories, prompts, replies, source code, command bodies, tool arguments, and raw tool output. See [SECURITY.md](SECURITY.md) for the reporting and privacy policy.
 
-The optional handoff action runs only after an explicit user action on an idle task. Guardian sends one ordinary instruction to the current Codex task and never archives, deletes, summarizes, injects history into, or creates a task itself. Codex owns the resulting summary and destination task.
+## Themes and licensing
 
-See [SECURITY.md](SECURITY.md) for reporting and privacy details.
-
-## Animation themes
-
-The repository includes two Shin-chan-inspired fan-art animation sets. They are intentionally licensed separately from the software.
-
-To deterministically regenerate the Pixel Shin-chan frames:
+The repository includes two Shin-chan-inspired fan-art animation sets. They are licensed separately from the software. The optional import script downloads a pinned public spritesheet only when run manually and verifies it with SHA-256:
 
 ```bash
 scripts/import-shinchan-codex-pet.sh
 ```
 
-The script verifies the upstream spritesheet with SHA-256 before extracting the six semantic states used by the app.
-
-## License
-
 - Source code and documentation: [MIT License](LICENSE)
 - Character images and animation assets: personal, non-commercial fan use only; see [ASSETS_LICENSE.md](ASSETS_LICENSE.md)
 
-The asset restriction means the repository uses a **mixed license**. The software code is open source, while the included character artwork is not open source under the OSI definition.
+This is therefore a **mixed-license repository**: the software is open source, while the included character artwork is not open source under the OSI definition.
 
 ## Contributing
 
-Bug reports and focused pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
-
-Useful GitHub topics: `openai-codex`, `codex`, `macos`, `swiftui`, `menu-bar-app`, `token-usage`, `session-monitoring`, `privacy`, `developer-tools`.
+Focused issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing.

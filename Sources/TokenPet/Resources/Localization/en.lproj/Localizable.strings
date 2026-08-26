@@ -276,7 +276,7 @@
 "Awaiting first lifecycle event" = "Awaiting first lifecycle event";
 "Stale" = "Stale";
 "Open Codex /hooks to review and trust both handlers. Guardian does not edit config.toml." = "Open Codex /hooks to review and trust both handlers. Guardian does not edit config.toml.";
-"Rollout activity was observed without a recent lifecycle event. Fully restart Codex Desktop; Guardian does not edit config.toml." = "Rollout activity was observed without a recent lifecycle event. Fully restart Codex Desktop; Guardian does not edit config.toml.";
+"A newer lifecycle event did not reach Guardian. Review the relevant handler in Codex /hooks, then start one new child task to verify. Guardian does not edit config.toml." = "A newer lifecycle event did not reach Guardian. Review the relevant handler in Codex /hooks, then start one new child task to verify. Guardian does not edit config.toml.";
 "Review the lifecycle handlers in Codex /hooks. Guardian does not edit config.toml." = "Review the lifecycle handlers in Codex /hooks. Guardian does not edit config.toml.";
 "Configuration reminder Hook is inactive" = "Configuration reminder Hook is inactive";
 "No configuration event reached Guardian after installation. Fully restart Codex Desktop, then send one prompt; Guardian will verify the chain automatically." = "No configuration event reached Guardian after installation. Fully restart Codex Desktop, then send one prompt; Guardian will verify the chain automatically.";

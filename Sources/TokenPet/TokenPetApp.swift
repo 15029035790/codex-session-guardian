@@ -273,6 +273,7 @@ final class DashboardModel: ObservableObject {
     private var resumeWarningBudget = ResumeWarningBudget()
     private var suppressedExecutionAdvisoryIDs = Set<String>()
     private var announcedExecutionAdvisoryIDs = Set<String>()
+    private var subagentHookHealthReminderSuppression = SubagentHookHealthReminderSuppression()
     private var codexHookMetadata: [CodexHookMetadata] = []
     private var codexHookMetadataCheckedAt: Date?
     private var codexHooksFileModifiedAt: Date?
@@ -289,6 +290,9 @@ final class DashboardModel: ObservableObject {
             routingPreferenceProfile = try store.loadRoutingPreferenceProfile()
             routingPreflights = try store.routingPreflights(limit: 100)
             subagentHookHealth = try store.subagentHookHealthDiagnostics(limit: 1).first?.snapshot
+            subagentHookHealthReminderSuppression = SubagentHookHealthReminderSuppression(
+                dismissedFingerprint: UserDefaults.standard.string(
+                    forKey: "TokenPetSubagentHookHealthDismissedFingerprint"))
             scanner = SessionScanner(store: store, codexHome: SessionScanner.defaultCodexHome())
             let bridge = RoutingPreflightBridgeServer { [weak self] replay in
                 Task { @MainActor [weak self] in
@@ -406,7 +410,7 @@ final class DashboardModel: ObservableObject {
                 self.activePaths = result.activePaths
                 self.routingPreflights = preflights
                 self.synchronizeMultiAgentFindings(auditFindings)
-                if let hookHealth { self.subagentHookHealth = hookHealth }
+                if let hookHealth { self.synchronizeSubagentHookHealth(hookHealth) }
                 if refreshHookMetadata {
                     self.codexHookMetadata = appServerHooks
                     self.codexHookMetadataCheckedAt = Date()
@@ -513,6 +517,27 @@ final class DashboardModel: ObservableObject {
     func continueObserving(_ finding: MultiAgentAuditFinding) {
         suppressedExecutionAdvisoryIDs.insert(finding.id)
         if activeExecutionAdvisory?.id == finding.id { activeExecutionAdvisory = nil }
+    }
+
+    var shouldShowSubagentHookHealthCard: Bool {
+        guard let snapshot = subagentHookHealth else { return false }
+        return snapshot.requiresAttention && !subagentHookHealthReminderSuppression.suppresses(snapshot)
+    }
+
+    func dismissSubagentHookHealthCard() {
+        guard let snapshot = subagentHookHealth else { return }
+        subagentHookHealthReminderSuppression.dismiss(snapshot)
+        UserDefaults.standard.set(
+            subagentHookHealthReminderSuppression.dismissedFingerprint,
+            forKey: "TokenPetSubagentHookHealthDismissedFingerprint")
+    }
+
+    private func synchronizeSubagentHookHealth(_ snapshot: SubagentHookHealthSnapshot) {
+        subagentHookHealthReminderSuppression.reconcile(with: snapshot)
+        if subagentHookHealthReminderSuppression.dismissedFingerprint == nil {
+            UserDefaults.standard.removeObject(forKey: "TokenPetSubagentHookHealthDismissedFingerprint")
+        }
+        subagentHookHealth = snapshot
     }
 
     private func performReplay(_ replay: PendingRoutingReplay, using selection: RoutingSelection) {
@@ -1842,8 +1867,8 @@ private struct FloatingPetView: View {
                     if let finding = model.activeExecutionAdvisory {
                         FloatingExecutionAdvisoryCard(finding: finding, model: model)
                     }
-                    if let hookHealth = model.subagentHookHealth, hookHealth.requiresAttention {
-                        FloatingSubagentHookHealthCard(snapshot: hookHealth)
+                    if let hookHealth = model.subagentHookHealth, model.shouldShowSubagentHookHealthCard {
+                        FloatingSubagentHookHealthCard(snapshot: hookHealth, model: model)
                     }
                     if let warning = model.resumeWarning {
                         FloatingResumeWarningCard(session: warning, model: model)
@@ -1907,7 +1932,7 @@ private struct FloatingPetView: View {
                                 .padding(.trailing, 2)
                                 .allowsHitTesting(false)
                                 .accessibilityLabel(L("Execution strategy needs attention"))
-                        } else if let hookHealth = model.subagentHookHealth, hookHealth.requiresAttention {
+                        } else if model.shouldShowSubagentHookHealthCard {
                             Image(systemName: "link.badge.plus")
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.white)
@@ -2795,6 +2820,7 @@ private struct FloatingExecutionAdvisoryCard: View {
 
 private struct FloatingSubagentHookHealthCard: View {
     let snapshot: SubagentHookHealthSnapshot
+    @ObservedObject var model: DashboardModel
 
     private func stateText(_ state: SubagentHookHealthState) -> String {
         switch state {
@@ -2811,7 +2837,7 @@ private struct FloatingSubagentHookHealthCard: View {
             return L("Open Codex /hooks to review and trust both handlers. Guardian does not edit config.toml.")
         }
         if snapshot.start.state == .stale || snapshot.stop.state == .stale {
-            return L("Rollout activity was observed without a recent lifecycle event. Fully restart Codex Desktop; Guardian does not edit config.toml.")
+            return L("A newer lifecycle event did not reach Guardian. Review the relevant handler in Codex /hooks, then start one new child task to verify. Guardian does not edit config.toml.")
         }
         return L("Review the lifecycle handlers in Codex /hooks. Guardian does not edit config.toml.")
     }
@@ -2835,9 +2861,15 @@ private struct FloatingSubagentHookHealthCard: View {
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(L("Got it")) { model.dismissSubagentHookHealthCard() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                Spacer()
+            }
         }
         .padding(18)
-        .frame(minWidth: 556, maxWidth: 556, minHeight: 150, alignment: .topLeading)
+        .frame(minWidth: 556, maxWidth: 556, minHeight: 180, alignment: .topLeading)
         .background(
             LinearGradient(
                 colors: [.black.opacity(0.97), .orange.opacity(0.18)],

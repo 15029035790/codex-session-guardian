@@ -397,7 +397,7 @@ Phase 2 退出门槛：
 
 - 将父任务的 `spawn_agent` 调度记录与 `thread_spawn.agent_path` 子任务日志关联，继承历史中的父会话元数据不得覆盖子任务身份；
 - 识别通用 worker 全量继承、冻结任务全量继承、三个及以上已知子任务并发，以及同时超过 10M provider Token 和 2M 加权 Token 的高消耗子任务；缓存输入按 10% 计入加权消耗，provider Token 原值仍完整展示；
-- 高置信度且仍在运行的命中通过小新浮层提供“打断父任务”与“继续观察”，是否打断始终由用户决定；Guardian 不自动中止、不自动修改 Agent、模型或 effort；
+- 高置信度且仍在运行的命中通过小新浮层提供“打断父任务”与“继续观察”，是否打断始终由用户决定；其中单一、缓存主导的子任务仅保留复盘记录，只有未缓存 provider 工作达到 1M Token 才显示高消耗运行中提醒；Guardian 不自动中止、不自动修改 Agent、模型或 effort；
 - 任务结束后只保留复盘建议；菜单栏展示本地证据，CLI 可用 `--multi-agent-audit --multi-agent-audit-days N` 复跑；
 - Guardian 内部安全审查等没有对应 `spawn_agent` 记录的子进程不参与并发扇出判断，避免把宿主内部机制误报为用户调度。
 

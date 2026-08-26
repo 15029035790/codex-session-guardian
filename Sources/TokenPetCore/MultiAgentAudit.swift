@@ -91,6 +91,11 @@ public struct MultiAgentAuditFinding: Codable, Equatable, Identifiable, Sendable
 public enum MultiAgentAuditPolicy {
     public static let largeProviderTokenThreshold = 10_000_000
     public static let largeWeightedTokenThreshold = 2_000_000
+    /// Cached context is retained in the diagnostic record, but it is not by
+    /// itself actionable while a bounded child task is progressing. Require a
+    /// meaningful amount of non-cached provider work before showing the
+    /// runtime observation card.
+    public static let runtimeNonCachedTokenThreshold = 1_000_000
     public static let broadParallelAgentThreshold = 3
 
     public static func evaluate(turns: [TurnRecord]) -> [MultiAgentAuditFinding] {
@@ -139,7 +144,9 @@ public enum MultiAgentAuditPolicy {
                         usage: usage,
                         active: active,
                         reason: .largeTokenBurn,
-                        severity: active ? .observeDuringExecution : .reviewAfterCompletion))
+                        severity: active && nonCachedProviderWork(usage) >= runtimeNonCachedTokenThreshold
+                            ? .observeDuringExecution
+                            : .reviewAfterCompletion))
                 }
             }
             let dispatchedTaskNames = Set(dispatches.map(\.taskName))
@@ -203,6 +210,10 @@ public enum MultiAgentAuditPolicy {
 
     private static func weightedBurn(_ usage: TokenUsage) -> Int {
         usage.freshInput + usage.output + usage.reasoningOutput + usage.cachedInput / 10
+    }
+
+    private static func nonCachedProviderWork(_ usage: TokenUsage) -> Int {
+        usage.freshInput + usage.output + usage.reasoningOutput
     }
 }
 
